@@ -108,36 +108,59 @@ async def generate_dynamic_alert(district: str, state: str):
     """Generate dynamic alert data using geographic functions and REAL weather data"""
     
     try:
-        # Get villages for the district
+        # Step 1: Get villages for the district using your geographic tools
         villages_data = await geographic_tools.list_villages(state, district)
         
-        # Pick a random village or use default
-        village_name = f"Village in {district}"
-        if "villages" in villages_data and villages_data["villages"]:
-            village_name = random.choice(villages_data["villages"])
-            # Avoid village name being same as district
-            if village_name.lower() == district.lower() and len(villages_data["villages"]) > 1:
-                other_villages = [v for v in villages_data["villages"] if v.lower() != district.lower()]
-                if other_villages:
-                    village_name = random.choice(other_villages)
+        if "error" in villages_data:
+            raise Exception(f"District '{district}' not found in {state}")
         
-        # Get coordinates for the district/village
-        location_coords = [25.5941, 85.1376]  # Default to Patna
+        # Step 2: Pick a random village from the actual list
+        available_villages = villages_data.get("villages", [])
+        if not available_villages:
+            raise Exception(f"No villages found for {district}")
         
-        # Try to get coordinates for the district first
+        selected_village = random.choice(available_villages)
+        logger.info(f"Selected village: {selected_village} from {len(available_villages)} villages")
+        
+        # Step 3: Try to get coordinates for the selected village first, then district
+        location_coords = None
+        location_source = ""
+        
+        # Try village coordinates first
         try:
-            district_location = await geographic_tools.reverse_geocode(district)
-            if "error" not in district_location and "lat" in district_location:
-                location_coords = [district_location["lat"], district_location["lng"]]
-        except:
-            pass  # Keep default coordinates
+            village_location = await geographic_tools.reverse_geocode(selected_village)
+            if "error" not in village_location and "lat" in village_location:
+                location_coords = [village_location["lat"], village_location["lng"]]
+                location_source = f"village_{selected_village}"
+                logger.info(f"Using village coordinates for {selected_village}: {location_coords}")
+        except Exception as e:
+            logger.warning(f"Village geocoding failed for {selected_village}: {e}")
         
-        # Generate regional crop and stage
-        regional_crop = get_regional_crop_for_area(district, state)
-        crop_stage = get_current_crop_stage(regional_crop)
+        # Fallback to district coordinates if village lookup failed
+        if not location_coords:
+            try:
+                district_location = await geographic_tools.reverse_geocode(district)
+                if "error" not in district_location and "lat" in district_location:
+                    location_coords = [district_location["lat"], district_location["lng"]]
+                    location_source = f"district_{district}"
+                    logger.info(f"Using district coordinates for {district}: {location_coords}")
+            except Exception as e:
+                logger.warning(f"District geocoding failed for {district}: {e}")
         
-        # GET WEATHER DATA 
+        # Final fallback - but this should rarely happen now
+        if not location_coords:
+            logger.warning(f"No coordinates found for {selected_village} or {district}, using default")
+            location_coords = [25.5941, 85.1376]  # Patna fallback
+            location_source = "fallback_patna"
+        
+        # Step 4: Generate regional crop and stage using crop calendar data
+        regional_crop = await get_regional_crop_for_area(district, state)
+        crop_stage = await get_current_crop_stage_dynamic(regional_crop, district)
+        
+        # Step 5: GET REAL WEATHER DATA using the actual coordinates
         try:
+            logger.info(f"Fetching weather for coordinates: {location_coords} (source: {location_source})")
+            
             current_weather_data = await open_meteo.get_current_weather(
                 latitude=location_coords[0], 
                 longitude=location_coords[1]
@@ -169,50 +192,63 @@ async def generate_dynamic_alert(district: str, state: str):
                 "expected_rainfall": f"{next_3_days_rain:.1f}mm",
                 "temperature": f"{current_temp:.1f}°C",
                 "humidity": f"{estimated_humidity}%",
-                "wind_speed": f"{current_windspeed:.1f} km/h"
+                "wind_speed": f"{current_windspeed:.1f} km/h",
+                "coordinates_source": location_source  # Track where coords came from
             }
             
-            # Generate alert message based on weather conditions
+            # Step 6: Generate alert message based on actual weather conditions
             if next_3_days_rain > 25:
                 alert_type = "heavy_rain_warning"
                 urgency = "high"
-                alert_message = f"Heavy rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days in {district}. Delay fertilizer application. Ensure proper drainage."
+                alert_message = f"Heavy rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days near {selected_village}, {district}. Delay fertilizer application. Ensure proper drainage."
                 action_items = ["delay_fertilizer", "check_drainage", "monitor_crops", "prepare_harvest_protection"]
             elif next_3_days_rain > 10:
                 alert_type = "moderate_rain_warning"
                 urgency = "medium"
-                alert_message = f"Moderate rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days in {district}. Monitor soil moisture levels."
+                alert_message = f"Moderate rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days near {selected_village}, {district}. Monitor soil moisture levels."
                 action_items = ["monitor_soil", "check_drainage", "adjust_irrigation"]
             elif next_3_days_rain < 2 and current_temp > 35:
                 alert_type = "heat_drought_warning"
                 urgency = "high"
-                alert_message = f"High temperature ({current_temp:.1f}°C) with minimal rainfall expected in {district}. Increase irrigation frequency."
+                alert_message = f"High temperature ({current_temp:.1f}°C) with minimal rainfall expected near {selected_village}, {district}. Increase irrigation frequency."
                 action_items = ["increase_irrigation", "mulch_crops", "monitor_plant_stress"]
+            elif current_temp < 10:
+                alert_type = "cold_warning"
+                urgency = "medium"
+                alert_message = f"Low temperature ({current_temp:.1f}°C) expected near {selected_village}, {district}. Protect crops from cold damage."
+                action_items = ["protect_crops", "cover_seedlings", "adjust_irrigation_timing"]
+            elif current_windspeed > 30:
+                alert_type = "high_wind_warning"
+                urgency = "medium"
+                alert_message = f"High winds ({current_windspeed:.1f} km/h) expected near {selected_village}, {district}. Secure crop supports and structures."
+                action_items = ["secure_supports", "check_structures", "monitor_damage"]
             else:
                 alert_type = "weather_update"
                 urgency = "low"
-                alert_message = f"Normal weather conditions expected in {district}. Temperature {current_temp:.1f}°C, rainfall {next_3_days_rain:.1f}mm."
+                alert_message = f"Normal weather conditions expected near {selected_village}, {district}. Temperature {current_temp:.1f}°C, rainfall {next_3_days_rain:.1f}mm."
                 action_items = ["routine_monitoring", "maintain_irrigation"]
             
-            logger.info(f"Real weather data retrieved for {district}: {current_temp}°C, {next_3_days_rain:.1f}mm rain")
+            logger.info(f"Real weather data retrieved for {selected_village}, {district}: {current_temp}°C, {next_3_days_rain:.1f}mm rain (coords: {location_coords})")
             
         except Exception as weather_error:
-            logger.error(f"Failed to get real weather data for {district}: {weather_error}")
-            raise Exception(f"Unable to retrieve current weather conditions for {district}")
+            logger.error(f"Failed to get real weather data for {selected_village}, {district}: {weather_error}")
+            raise Exception(f"Unable to retrieve current weather conditions for {selected_village}, {district}")
         
         return {
-            "alert_id": f"{state.upper()[:2]}_{district.upper()[:3]}_001_{datetime.now().strftime('%Y%m%d')}",
+            "alert_id": f"{state.upper()[:2]}_{district.upper()[:3]}_{selected_village.upper()[:3]}_{datetime.now().strftime('%Y%m%d_%H%M')}",
             "timestamp": datetime.now().isoformat() + "Z",
             "location": {
-                "village": village_name,
+                "village": selected_village,
                 "district": district,
                 "state": state.capitalize(),
-                "coordinates": location_coords
+                "coordinates": location_coords,
+                "coordinates_source": location_source,
+                "total_villages_in_district": len(available_villages)
             },
             "crop": {
                 "name": regional_crop,
                 "stage": crop_stage,
-                "planted_estimate": "2025-06-15"
+                "planted_estimate": "2025-06-15"  # You could make this dynamic too
             },
             "alert": {
                 "type": alert_type,
@@ -222,12 +258,312 @@ async def generate_dynamic_alert(district: str, state: str):
                 "valid_until": (datetime.now() + timedelta(days=3)).isoformat() + "Z"
             },
             "weather": real_weather,
-            "data_source": "open_meteo_api"  
+            "data_source": "open_meteo_api_with_dynamic_location"
         }
     
     except Exception as e:
         logger.error(f"Error generating dynamic alert for {district}, {state}: {e}")
         raise Exception(f"Failed to generate weather alert for {district}: {str(e)}")
+
+
+
+
+import random
+from datetime import datetime, date
+
+# Enhanced crop selection function using your crop calendar data
+async def get_regional_crop_for_area(district: str, state: str):
+    """Get typical crop for the region based on season and district - now fully dynamic"""
+    
+    if state.lower() != 'bihar':
+        return 'rice'  # fallback for other states
+    
+    current_month = datetime.now().month
+    current_season = get_current_season(current_month)
+    
+    # Get crops that are currently in season using your crop calendar tools
+    try:
+        seasonal_crops_data = await crop_calendar_tools.get_prominent_crops('bihar', current_season)
+        if "error" not in seasonal_crops_data:
+            seasonal_crops = seasonal_crops_data.get('crops', [])
+        else:
+            seasonal_crops = []
+    except Exception as e:
+        logger.warning(f"Failed to get seasonal crops: {e}")
+        seasonal_crops = []
+    
+    # District-specific crop preferences (what's commonly grown in each district)
+    district_crop_preferences = {
+        'patna': {
+            'primary': ['rice', 'wheat', 'potato'],
+            'secondary': ['mustard', 'gram', 'barley'],
+            'specialty': ['sugarcane']
+        },
+        'gaya': {
+            'primary': ['wheat', 'rice', 'gram'],
+            'secondary': ['barley', 'lentil', 'mustard'],
+            'specialty': ['arhar']
+        },
+        'bhagalpur': {
+            'primary': ['rice', 'maize', 'wheat'],
+            'secondary': ['jute', 'urd', 'moong'],
+            'specialty': ['groundnut']
+        },
+        'muzaffarpur': {
+            'primary': ['sugarcane', 'rice', 'wheat'],
+            'secondary': ['potato', 'mustard'],
+            'specialty': ['lentil']
+        },
+        'darbhanga': {
+            'primary': ['rice', 'wheat', 'maize'],
+            'secondary': ['gram', 'arhar'],
+            'specialty': ['bajra']
+        },
+        'siwan': {
+            'primary': ['rice', 'wheat'],
+            'secondary': ['gram', 'lentil', 'pea'],
+            'specialty': ['mustard']
+        },
+        'begusarai': {
+            'primary': ['rice', 'wheat'],
+            'secondary': ['jute', 'mustard'],
+            'specialty': ['moong', 'urd']
+        },
+        'katihar': {
+            'primary': ['maize', 'rice'],
+            'secondary': ['jute', 'urd', 'moong'],
+            'specialty': ['jowar', 'bajra']
+        },
+        'vaishali': {
+            'primary': ['rice', 'wheat', 'sugarcane'],
+            'secondary': ['potato', 'gram'],
+            'specialty': ['mustard']
+        },
+        'madhubani': {
+            'primary': ['rice', 'wheat', 'maize'],
+            'secondary': ['gram', 'lentil'],
+            'specialty': ['arhar']
+        }
+    }
+    
+    # Get district preferences or use default
+    district_prefs = district_crop_preferences.get(district.lower(), {
+        'primary': ['rice', 'wheat'],
+        'secondary': ['gram', 'mustard'],
+        'specialty': ['maize']
+    })
+    
+    # Combine all possible crops for this district
+    all_district_crops = (district_prefs.get('primary', []) + 
+                         district_prefs.get('secondary', []) + 
+                         district_prefs.get('specialty', []))
+    
+    # Find crops that are both seasonal AND grown in this district
+    suitable_crops = []
+    if seasonal_crops:
+        suitable_crops = [crop for crop in all_district_crops if crop in seasonal_crops]
+    
+    # If no seasonal match, use district preferences with seasonal weighting
+    if not suitable_crops:
+        if current_season == 'kharif':
+            # Monsoon crops preference
+            kharif_crops = ['rice', 'maize', 'arhar', 'moong', 'urd', 'jowar', 'bajra', 'groundnut', 'soybean']
+            suitable_crops = [crop for crop in all_district_crops if crop in kharif_crops]
+        elif current_season == 'rabi':
+            # Winter crops preference
+            rabi_crops = ['wheat', 'barley', 'gram', 'lentil', 'pea', 'mustard', 'linseed', 'potato']
+            suitable_crops = [crop for crop in all_district_crops if crop in rabi_crops]
+        elif current_season == 'zaid':
+            # Summer crops preference
+            zaid_crops = ['maize', 'moong', 'urd', 'watermelon', 'cucumber']
+            suitable_crops = [crop for crop in all_district_crops if crop in zaid_crops]
+    
+    # If still no match, fall back to district primary crops
+    if not suitable_crops:
+        suitable_crops = district_prefs.get('primary', ['rice'])
+    
+    # Weight selection based on crop category (primary crops more likely)
+    weighted_crops = []
+    for crop in suitable_crops:
+        if crop in district_prefs.get('primary', []):
+            weighted_crops.extend([crop] * 5)  # 5x weight for primary crops
+        elif crop in district_prefs.get('secondary', []):
+            weighted_crops.extend([crop] * 3)  # 3x weight for secondary crops
+        else:
+            weighted_crops.extend([crop] * 1)  # 1x weight for specialty crops
+    
+    selected_crop = random.choice(weighted_crops) if weighted_crops else 'rice'
+    
+    logger.info(f"Selected crop: {selected_crop} for {district} in {current_season} season from options: {suitable_crops}")
+    
+    return selected_crop
+
+
+async def get_current_crop_stage_dynamic(crop: str, district: str = None):
+    """Determine crop stage based on current date and crop calendar - now more accurate"""
+    
+    try:
+        # Get crop calendar information
+        crop_info = await crop_calendar_tools.get_crop_calendar('bihar', crop)
+        
+        if "error" in crop_info:
+            # Fallback to the old static method
+            return get_current_crop_stage_static(crop)
+        
+        # Parse planting and harvesting periods
+        planting_period = crop_info.get('planting', '')
+        season = crop_info.get('season', '')
+        stages = crop_info.get('stages', [])
+        
+        current_month = datetime.now().month
+        current_date = date.today()
+        
+        # Estimate planting date based on season and current month
+        estimated_plant_date = estimate_planting_date(crop, season, planting_period, current_month)
+        
+        if estimated_plant_date:
+            # Use the crop calendar function to estimate stage
+            try:
+                stage_data = await crop_calendar_tools.estimate_crop_stage(
+                    crop, 
+                    estimated_plant_date.isoformat(), 
+                    current_date.isoformat()
+                )
+                
+                if "error" not in stage_data:
+                    stage = stage_data.get('stage', stages[0] if stages else 'Growing')
+                    logger.info(f"Dynamic stage calculation for {crop}: {stage} (planted ~{estimated_plant_date})")
+                    return stage
+            except Exception as e:
+                logger.warning(f"Error in dynamic stage calculation: {e}")
+        
+        # Fallback to month-based estimation
+        return estimate_stage_by_month(crop, current_month, stages)
+    
+    except Exception as e:
+        logger.error(f"Error in dynamic crop stage calculation: {e}")
+        return get_current_crop_stage_static(crop)
+
+
+def get_current_season(month: int):
+    """Determine current agricultural season"""
+    if month in [6, 7, 8, 9]:  # June to September
+        return 'kharif'
+    elif month in [10, 11, 12, 1, 2, 3]:  # October to March
+        return 'rabi'
+    else:  # April, May
+        return 'zaid'
+
+
+def estimate_planting_date(crop: str, season: str, planting_period: str, current_month: int):
+    """Estimate when the crop was likely planted based on season and current month"""
+    from datetime import date, timedelta
+    
+    current_year = datetime.now().year
+    
+    try:
+        if 'june-july' in planting_period.lower() or 'june' in planting_period.lower():
+            if current_month >= 6:
+                return date(current_year, 6, 15)  # Mid June this year
+            else:
+                return date(current_year - 1, 6, 15)  # Mid June last year
+                
+        elif 'november-december' in planting_period.lower() or 'november' in planting_period.lower():
+            if current_month >= 11:
+                return date(current_year, 11, 15)  # Mid November this year
+            elif current_month <= 4:
+                return date(current_year - 1, 11, 15)  # Mid November last year
+            else:
+                return date(current_year, 11, 15)  # Will be planted this November
+                
+        elif 'october-november' in planting_period.lower() or 'october' in planting_period.lower():
+            if current_month >= 10:
+                return date(current_year, 10, 15)
+            elif current_month <= 4:
+                return date(current_year - 1, 10, 15)
+            else:
+                return date(current_year, 10, 15)
+                
+        elif 'march-april' in planting_period.lower() or 'march' in planting_period.lower():
+            if current_month >= 3 and current_month <= 8:
+                return date(current_year, 3, 15)
+            else:
+                return date(current_year - 1, 3, 15)
+                
+    except Exception as e:
+        logger.warning(f"Error estimating planting date: {e}")
+    
+    return None
+
+
+def estimate_stage_by_month(crop: str, current_month: int, stages: list):
+    """Estimate crop stage based on current month and crop type"""
+    
+    if not stages:
+        return 'Growing'
+    
+    # Month-based stage mapping for common crops
+    stage_mappings = {
+        'rice': {
+            6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 8, 3: 8, 4: 8, 5: 8
+        },
+        'wheat': {
+            11: 0, 12: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 8, 9: 8, 10: 8
+        },
+        'maize': {
+            6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 7, 3: 0, 4: 1, 5: 2  # Dual season
+        }
+    }
+    
+    crop_mapping = stage_mappings.get(crop, {})
+    stage_index = crop_mapping.get(current_month, 2)  # Default to middle stage
+    stage_index = min(stage_index, len(stages) - 1)
+    
+    return stages[stage_index] if stage_index < len(stages) else stages[-1]
+
+
+def get_current_crop_stage_static(crop: str):
+    """Original static crop stage function as fallback"""
+    current_month = datetime.now().month
+    
+    if crop == 'rice':
+        if current_month in [6, 7]:
+            return 'Transplanting'
+        elif current_month in [8, 9]:
+            return 'Vegetative'
+        elif current_month in [10, 11]:
+            return 'Flowering'
+        else:
+            return 'Maturity'
+    elif crop == 'wheat':
+        if current_month in [11, 12]:
+            return 'Sowing'
+        elif current_month in [1, 2]:
+            return 'Tillering'
+        elif current_month in [3, 4]:
+            return 'Flowering'
+        else:
+            return 'Harvesting'
+    elif crop == 'sugarcane':
+        if current_month in [2, 3, 4]:
+            return 'Planting'
+        elif current_month in [5, 6, 7, 8]:
+            return 'Vegetative'
+        elif current_month in [9, 10, 11]:
+            return 'Maturity'
+        else:
+            return 'Harvesting'
+    elif crop == 'maize':
+        if current_month in [6, 7]:
+            return 'Sowing'
+        elif current_month in [8, 9]:
+            return 'Vegetative'
+        elif current_month in [10, 11]:
+            return 'Grain Filling'
+        else:
+            return 'Harvesting'
+    
+    return 'Growing'
 
 
 @app.get("/")
