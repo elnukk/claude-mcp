@@ -207,8 +207,8 @@ async def get_location_coordinates(village: str, district: str) -> tuple[list, s
     # Try village coordinates first
     try:
         village_location = await geographic_tools.reverse_geocode(village)
-        if "error" not in village_location and "lat" in village_location:
-            location_coords = [village_location["lat"], village_location["lng"]]
+        if "error" not in village_location and "latitude" in village_location:
+            location_coords = [village_location["latitude"], village_location["longitude"]]
             location_source = f"village_{village}"
             logger.info(f"Using village coordinates for {village}: {location_coords}")
     except Exception as e:
@@ -218,8 +218,8 @@ async def get_location_coordinates(village: str, district: str) -> tuple[list, s
     if not location_coords:
         try:
             district_location = await geographic_tools.reverse_geocode(district)
-            if "error" not in district_location and "lat" in district_location:
-                location_coords = [district_location["lat"], district_location["lng"]]
+            if "error" not in district_location and "latitude" in district_location:
+                location_coords = [district_location["latitude"], district_location["longitude"]]
                 location_source = f"district_{district}"
                 logger.info(f"Using district coordinates for {district}: {location_coords}")
         except Exception as e:
