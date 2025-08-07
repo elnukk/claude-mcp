@@ -347,8 +347,21 @@ async def list_villages(state: str, district: str = None):
 async def reverse_geocode(location_name: str):
     """
     Returns the coordinates for a given location name.
+    Handles case-insensitive matching and partial matches.
     """
-    return locations.get(location_name.lower(), {"error": "Location not found"})
+    # First try exact lowercase match
+    exact_match = locations.get(location_name.lower())
+    if exact_match:
+        return exact_match
+    
+    # Try partial matching if exact match fails
+    location_lower = location_name.lower()
+    for key, coords in locations.items():
+        if location_lower in key or key in location_lower:
+            return coords
+    
+    # If no match found
+    return {"error": "Location not found"}
 
 async def get_administrative_bounds(village_id: str):
     """
