@@ -23,6 +23,7 @@ logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 print("OPENAI_API_KEY exists?", os.getenv("OPENAI_API_KEY") is not None)
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
 
