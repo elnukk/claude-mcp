@@ -22,6 +22,8 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+print("OPENAI_API_KEY exists?", os.getenv("OPENAI_API_KEY") is not None)
+
 app = FastAPI()
 
 # CORS middleware for frontend
