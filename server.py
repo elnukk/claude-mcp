@@ -454,73 +454,156 @@ def get_current_season(month: int):
     else:  # April, May
         return 'zaid'
 
-
-def estimate_planting_date(crop: str, season: str, planting_period: str, current_month: int):
-    """Estimate when the crop was likely planted based on season and current month"""
-    from datetime import date, timedelta
+async def get_regional_crop_for_area(district: str, state: str):
+    """Get typical crop for the region based on season and district - now fully dynamic"""
     
+    if state.lower() != 'bihar':
+        return 'rice'  # fallback for other states
+    
+    current_month = datetime.now().month
+    current_season = get_current_season(current_month)
+    
+    # Get crops that are currently in season using your crop calendar tools
+    try:
+        seasonal_crops_data = await crop_calendar_tools.get_prominent_crops('bihar', current_season)
+        if "error" not in seasonal_crops_data:
+            seasonal_crops = seasonal_crops_data.get('crops', [])
+        else:
+            seasonal_crops = []
+    except Exception as e:
+        logger.warning(f"Failed to get seasonal crops: {e}")
+        seasonal_crops = []
+    
+    # District-specific crop preferences
+    district_crop_preferences = {
+        'patna': {'primary': ['rice', 'wheat', 'potato'], 'secondary': ['mustard', 'gram', 'barley'], 'specialty': ['sugarcane']},
+        'gaya': {'primary': ['wheat', 'rice', 'gram'], 'secondary': ['barley', 'lentil', 'mustard'], 'specialty': ['arhar']},
+        'bhagalpur': {'primary': ['rice', 'maize', 'wheat'], 'secondary': ['jute', 'urd', 'moong'], 'specialty': ['groundnut']},
+        'muzaffarpur': {'primary': ['sugarcane', 'rice', 'wheat'], 'secondary': ['potato', 'mustard'], 'specialty': ['lentil']},
+        'darbhanga': {'primary': ['rice', 'wheat', 'maize'], 'secondary': ['gram', 'arhar'], 'specialty': ['bajra']},
+        'siwan': {'primary': ['rice', 'wheat'], 'secondary': ['gram', 'lentil', 'pea'], 'specialty': ['mustard']},
+        'begusarai': {'primary': ['rice', 'wheat'], 'secondary': ['jute', 'mustard'], 'specialty': ['moong', 'urd']},
+        'katihar': {'primary': ['maize', 'rice'], 'secondary': ['jute', 'urd', 'moong'], 'specialty': ['jowar', 'bajra']}
+    }
+    
+    district_prefs = district_crop_preferences.get(district.lower(), {'primary': ['rice', 'wheat'], 'secondary': ['gram', 'mustard'], 'specialty': ['maize']})
+    
+    all_district_crops = (district_prefs.get('primary', []) + district_prefs.get('secondary', []) + district_prefs.get('specialty', []))
+    
+    # Find crops that are both seasonal AND grown in this district
+    suitable_crops = []
+    if seasonal_crops:
+        suitable_crops = [crop for crop in all_district_crops if crop in seasonal_crops]
+    
+    # If no seasonal match, use season-based fallback
+    if not suitable_crops:
+        if current_season == 'kharif':
+            kharif_crops = ['rice', 'maize', 'arhar', 'moong', 'urd', 'jowar', 'bajra', 'groundnut', 'soybean']
+            suitable_crops = [crop for crop in all_district_crops if crop in kharif_crops]
+        elif current_season == 'rabi':
+            rabi_crops = ['wheat', 'barley', 'gram', 'lentil', 'pea', 'mustard', 'linseed', 'potato']
+            suitable_crops = [crop for crop in all_district_crops if crop in rabi_crops]
+        elif current_season == 'zaid':
+            zaid_crops = ['maize', 'moong', 'urd', 'watermelon', 'cucumber']
+            suitable_crops = [crop for crop in all_district_crops if crop in zaid_crops]
+    
+    if not suitable_crops:
+        suitable_crops = district_prefs.get('primary', ['rice'])
+    
+    # Weight selection based on crop category
+    weighted_crops = []
+    for crop in suitable_crops:
+        if crop in district_prefs.get('primary', []):
+            weighted_crops.extend([crop] * 5)  # 5x weight for primary crops
+        elif crop in district_prefs.get('secondary', []):
+            weighted_crops.extend([crop] * 3)  # 3x weight for secondary crops
+        else:
+            weighted_crops.extend([crop] * 1)  # 1x weight for specialty crops
+    
+    selected_crop = random.choice(weighted_crops) if weighted_crops else 'rice'
+    logger.info(f"Selected crop: {selected_crop} for {district} in {current_season} season")
+    
+    return selected_crop
+
+async def get_current_crop_stage_dynamic(crop: str, district: str = None):
+    """Determine crop stage based on current date and crop calendar"""
+    try:
+        crop_info = await crop_calendar_tools.get_crop_calendar('bihar', crop)
+        
+        if "error" in crop_info:
+            return get_current_crop_stage_static(crop)
+        
+        stages = crop_info.get('stages', [])
+        planting_period = crop_info.get('planting', '')
+        current_month = datetime.now().month
+        current_date = date.today()
+        
+        estimated_plant_date = estimate_planting_date(crop, planting_period, current_month)
+        
+        if estimated_plant_date:
+            try:
+                stage_data = await crop_calendar_tools.estimate_crop_stage(
+                    crop, estimated_plant_date.isoformat(), current_date.isoformat()
+                )
+                
+                if "error" not in stage_data:
+                    return stage_data.get('stage', stages[0] if stages else 'Growing')
+            except Exception as e:
+                logger.warning(f"Error in dynamic stage calculation: {e}")
+        
+        return estimate_stage_by_month(crop, current_month, stages)
+    
+    except Exception as e:
+        logger.error(f"Error in dynamic crop stage calculation: {e}")
+        return get_current_crop_stage_static(crop)
+
+def estimate_planting_date(crop: str, planting_period: str, current_month: int):
+    """Estimate when the crop was likely planted"""
     current_year = datetime.now().year
     
     try:
-        if 'june-july' in planting_period.lower() or 'june' in planting_period.lower():
-            if current_month >= 6:
-                return date(current_year, 6, 15)  # Mid June this year
-            else:
-                return date(current_year - 1, 6, 15)  # Mid June last year
-                
-        elif 'november-december' in planting_period.lower() or 'november' in planting_period.lower():
+        if 'june' in planting_period.lower():
+            return date(current_year, 6, 15) if current_month >= 6 else date(current_year - 1, 6, 15)
+        elif 'november' in planting_period.lower():
             if current_month >= 11:
-                return date(current_year, 11, 15)  # Mid November this year
+                return date(current_year, 11, 15)
             elif current_month <= 4:
-                return date(current_year - 1, 11, 15)  # Mid November last year
+                return date(current_year - 1, 11, 15)
             else:
-                return date(current_year, 11, 15)  # Will be planted this November
-                
-        elif 'october-november' in planting_period.lower() or 'october' in planting_period.lower():
+                return date(current_year, 11, 15)
+        elif 'october' in planting_period.lower():
             if current_month >= 10:
                 return date(current_year, 10, 15)
             elif current_month <= 4:
                 return date(current_year - 1, 10, 15)
             else:
                 return date(current_year, 10, 15)
-                
-        elif 'march-april' in planting_period.lower() or 'march' in planting_period.lower():
+        elif 'march' in planting_period.lower():
             if current_month >= 3 and current_month <= 8:
                 return date(current_year, 3, 15)
             else:
                 return date(current_year - 1, 3, 15)
-                
     except Exception as e:
         logger.warning(f"Error estimating planting date: {e}")
     
     return None
 
-
 def estimate_stage_by_month(crop: str, current_month: int, stages: list):
-    """Estimate crop stage based on current month and crop type"""
-    
+    """Estimate crop stage based on current month"""
     if not stages:
         return 'Growing'
     
-    # Month-based stage mapping for common crops
     stage_mappings = {
-        'rice': {
-            6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 8, 3: 8, 4: 8, 5: 8
-        },
-        'wheat': {
-            11: 0, 12: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 8, 9: 8, 10: 8
-        },
-        'maize': {
-            6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 7, 3: 0, 4: 1, 5: 2  # Dual season
-        }
+        'rice': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 8},
+        'wheat': {11: 0, 12: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8},
+        'maize': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 7, 3: 0, 4: 1, 5: 2}
     }
     
     crop_mapping = stage_mappings.get(crop, {})
-    stage_index = crop_mapping.get(current_month, 2)  # Default to middle stage
+    stage_index = crop_mapping.get(current_month, 2)
     stage_index = min(stage_index, len(stages) - 1)
     
     return stages[stage_index] if stage_index < len(stages) else stages[-1]
-
 
 def get_current_crop_stage_static(crop: str):
     """Original static crop stage function as fallback"""
@@ -565,6 +648,211 @@ def get_current_crop_stage_static(crop: str):
     
     return 'Growing'
 
+# 
+
+async def generate_dynamic_alert(district: str, state: str):
+    """Generate AI-powered dynamic alert data using real weather and crop intelligence"""
+    
+    try:
+        # Step 1: Get villages for the district
+        villages_data = await geographic_tools.list_villages(state, district)
+        
+        if "error" in villages_data:
+            raise Exception(f"District '{district}' not found in {state}")
+        
+        # Step 2: Pick a random village from the actual list
+        available_villages = villages_data.get("villages", [])
+        if not available_villages:
+            raise Exception(f"No villages found for {district}")
+        
+        selected_village = random.choice(available_villages)
+        logger.info(f"Selected village: {selected_village} from {len(available_villages)} villages")
+        
+        # Step 3: Get coordinates for the selected village/district
+        location_coords = None
+        location_source = ""
+        
+        # Try village coordinates first
+        try:
+            village_location = await geographic_tools.reverse_geocode(selected_village)
+            if "error" not in village_location and "lat" in village_location:
+                location_coords = [village_location["lat"], village_location["lng"]]
+                location_source = f"village_{selected_village}"
+                logger.info(f"Using village coordinates for {selected_village}: {location_coords}")
+        except Exception as e:
+            logger.warning(f"Village geocoding failed for {selected_village}: {e}")
+        
+        # Fallback to district coordinates if village lookup failed
+        if not location_coords:
+            try:
+                district_location = await geographic_tools.reverse_geocode(district)
+                if "error" not in district_location and "lat" in district_location:
+                    location_coords = [district_location["lat"], district_location["lng"]]
+                    location_source = f"district_{district}"
+                    logger.info(f"Using district coordinates for {district}: {location_coords}")
+            except Exception as e:
+                logger.warning(f"District geocoding failed for {district}: {e}")
+        
+        # Final fallback
+        if not location_coords:
+            logger.warning(f"No coordinates found for {selected_village} or {district}, using default")
+            location_coords = [25.5941, 85.1376]  # Patna fallback
+            location_source = "fallback_patna"
+        
+        # Step 4: Generate dynamic crop selection and stage
+        regional_crop = await get_regional_crop_for_area(district, state)
+        crop_stage = await get_current_crop_stage_dynamic(regional_crop, district)
+        
+        # Step 5: GET AI-POWERED WEATHER ALERT using your alert_generation_tools
+        try:
+            logger.info(f"Generating AI-powered alert for coordinates: {location_coords} (source: {location_source})")
+            
+            # Get the API key
+            api_key = config.get("OPENAI_API_KEY")
+            if not api_key:
+                raise Exception("OpenAI API key not found")
+            
+            # Use your AI prediction tool
+            ai_alert = await alert_generation_tools.predict_weather_alert(
+                latitude=location_coords[0],
+                longitude=location_coords[1],
+                api_key=api_key
+            )
+            
+            logger.info(f"AI alert generated successfully for {selected_village}, {district}")
+            
+            # Also get basic weather data for additional context
+            try:
+                current_weather_data = await open_meteo.get_current_weather(
+                    latitude=location_coords[0], 
+                    longitude=location_coords[1]
+                )
+                
+                forecast_data = await open_meteo.get_weather_forecast(
+                    latitude=location_coords[0], 
+                    longitude=location_coords[1],
+                    days=7
+                )
+                
+                current_weather = current_weather_data.get('current_weather', {})
+                daily_forecast = forecast_data.get('daily', {})
+                
+                current_temp = current_weather.get('temperature', 25)
+                current_windspeed = current_weather.get('windspeed', 10)
+                
+                precipitation_list = daily_forecast.get('precipitation_sum', [0, 0, 0])
+                next_3_days_rain = sum(precipitation_list[:3]) if precipitation_list else 0
+                
+                rain_probability = min(90, max(10, int(next_3_days_rain * 10))) if next_3_days_rain > 0 else 10
+                estimated_humidity = min(95, max(40, 60 + int(next_3_days_rain * 2)))
+                
+                weather_context = {
+                    "forecast_days": 7,
+                    "rain_probability": rain_probability,
+                    "expected_rainfall": f"{next_3_days_rain:.1f}mm",
+                    "temperature": f"{current_temp:.1f}°C",
+                    "humidity": f"{estimated_humidity}%",
+                    "wind_speed": f"{current_windspeed:.1f} km/h",
+                    "coordinates_source": location_source
+                }
+                
+            except Exception as weather_error:
+                logger.warning(f"Could not get basic weather data: {weather_error}")
+                weather_context = {
+                    "forecast_days": 7,
+                    "coordinates_source": location_source,
+                    "note": "Weather context limited due to API error"
+                }
+            
+            # Extract AI analysis
+            alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
+            impact_description = ai_alert.get('impact', 'Monitor crops regularly')
+            recommendations = ai_alert.get('recommendations', 'Continue routine farming activities')
+            
+            # Create comprehensive alert message combining AI insights
+            alert_message = f"🤖 AI Weather Alert for {selected_village}, {district}: {alert_description}"
+            if impact_description and impact_description.lower() not in ['none', 'n/a', '']:
+                alert_message += f" 🌾 Crop Impact: {impact_description}"
+            
+            # Determine urgency and type based on AI response content
+            urgency = "low"
+            alert_type = "weather_update"
+            
+            alert_lower = alert_description.lower()
+            impact_lower = impact_description.lower()
+            recommendations_lower = recommendations.lower()
+            
+            # High urgency keywords
+            if any(word in alert_lower + impact_lower for word in ['urgent', 'severe', 'critical', 'danger', 'emergency', 'immediate']):
+                urgency = "high"
+                alert_type = "severe_weather_warning"
+            # Medium urgency keywords  
+            elif any(word in alert_lower + impact_lower for word in ['warning', 'caution', 'alert', 'risk', 'damage', 'loss', 'stress', 'threat']):
+                urgency = "medium"
+                alert_type = "weather_warning"
+            # Check recommendations for urgency indicators
+            elif any(word in recommendations_lower for word in ['immediate', 'urgent', 'quickly', 'soon', 'now']):
+                urgency = "medium"
+                alert_type = "crop_risk_alert"
+            
+            # Parse recommendations into actionable items
+            action_items = []
+            if recommendations:
+                # Split recommendations by common delimiters and clean up
+                items = recommendations.replace('.', '|').replace(',', '|').replace(';', '|').replace(' and ', '|').split('|')
+                action_items = [item.strip().lower().replace(' ', '_') for item in items if item.strip() and len(item.strip()) > 3]
+                # Limit to 5 most important items and ensure they're actionable
+                action_items = [item for item in action_items[:5] if any(verb in item for verb in ['monitor', 'check', 'apply', 'water', 'harvest', 'plant', 'protect', 'cover', 'drain', 'spray', 'fertilize'])]
+            
+            if not action_items:
+                action_items = ["monitor_crops", "follow_weather_updates", "maintain_irrigation"]
+            
+            logger.info(f"AI-powered alert processed: Type={alert_type}, Urgency={urgency}, Actions={len(action_items)}")
+            
+        except Exception as ai_error:
+            logger.error(f"Failed to get AI weather alert for {selected_village}, {district}: {ai_error}")
+            raise Exception(f"Unable to generate AI weather alert: {str(ai_error)}")
+        
+        # Generate unique alert ID with timestamp
+        alert_id = f"{state.upper()[:2]}_{district.upper()[:3]}_{selected_village.upper()[:3]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        return {
+            "alert_id": alert_id,
+            "timestamp": datetime.now().isoformat() + "Z",
+            "location": {
+                "village": selected_village,
+                "district": district,
+                "state": state.capitalize(),
+                "coordinates": location_coords,
+                "coordinates_source": location_source,
+                "total_villages_in_district": len(available_villages)
+            },
+            "crop": {
+                "name": regional_crop,
+                "stage": crop_stage,
+                "season": get_current_season(datetime.now().month),
+                "planted_estimate": "2025-06-15"  # Could make this dynamic based on crop calendar
+            },
+            "alert": {
+                "type": alert_type,
+                "urgency": urgency,
+                "message": alert_message,
+                "action_items": action_items,
+                "valid_until": (datetime.now() + timedelta(days=3)).isoformat() + "Z",
+                "ai_generated": True
+            },
+            "ai_analysis": {
+                "alert": alert_description,
+                "impact": impact_description,
+                "recommendations": recommendations
+            },
+            "weather": weather_context,
+            "data_source": "ai_powered_openai_gpt4_with_open_meteo"
+        }
+    
+    except Exception as e:
+        logger.error(f"Error generating AI-powered alert for {district}, {state}: {e}")
+        raise Exception(f"Failed to generate AI weather alert for {district}: {str(e)}")
 
 @app.get("/")
 async def root():
