@@ -295,22 +295,50 @@ async def generate_weather_based_alert(weather_data: dict, crop: str, crop_stage
 
 async def generate_ai_alert(latitude: float, longitude: float, crop: str, 
                           crop_stage: str, village: str, district: str) -> Optional[dict]:
-    """Generate AI-powered weather alert using OpenAI"""
+    """Generate AI-powered weather alert using available tools"""
     if not openai_key:
         logger.warning("No OpenAI API key - skipping AI alert generation")
         return None
     
     try:
-        ai_alert = await alert_generation_tools.predict_weather_alert(
-            latitude=latitude,
-            longitude=longitude,
-            api_key=openai_key
+        # First get weather data for the AI context
+        current_weather_data = await open_meteo.get_current_weather(
+            latitude=latitude, longitude=longitude
+        )
+        forecast_data = await open_meteo.get_weather_forecast(
+            latitude=latitude, longitude=longitude, days=7
         )
         
-        # Extract and enhance AI response
-        alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
-        impact_description = ai_alert.get('impact', 'Monitor crops regularly')
-        recommendations = ai_alert.get('recommendations', 'Continue routine farming activities')
+        # Prepare weather context for AI
+        current_weather = current_weather_data.get('current_weather', {})
+        daily_forecast = forecast_data.get('daily', {})
+        
+        weather_context = {
+            'temperature': current_weather.get('temperature', 25),
+            'windspeed': current_weather.get('windspeed', 10),
+            'precipitation_forecast': daily_forecast.get('precipitation_sum', [0, 0, 0])[:3]
+        }
+        
+        # Use the generate_weather_alert function from your tools
+        ai_alert = await alert_generation_tools.generate_weather_alert(
+            crop=crop,
+            weather_data=weather_context,
+            growth_stage=crop_stage,
+            api_key=openai_key,
+            latitude=latitude,
+            longitude=longitude
+        )
+        
+        # Extract AI response (adjust based on your actual function return format)
+        if isinstance(ai_alert, dict):
+            alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
+            impact_description = ai_alert.get('impact', 'Monitor crops regularly') 
+            recommendations = ai_alert.get('recommendations', 'Continue routine farming activities')
+        else:
+            # If it returns a string or other format
+            alert_description = str(ai_alert)
+            impact_description = 'Monitor crops regularly'
+            recommendations = 'Follow weather updates and maintain good practices'
         
         # Create enhanced alert message
         alert_message = f"🤖 AI Weather Alert for {village}, {district}: {alert_description}"
