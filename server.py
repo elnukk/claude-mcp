@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import dotenv_values
 
-# Import your tools
+# Import tools
 from tools import (
     open_meteo, 
     tomorrow_io, 
