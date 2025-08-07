@@ -1,42 +1,57 @@
 import os
 import logging
 import random
+from datetime import datetime, timedelta, date
+from typing import Optional, Dict, List, Any
+import csv
+from io import StringIO
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import dotenv_values
-import asyncio
-from datetime import datetime, timedelta
-import csv
-from io import StringIO
-import openai
 
-from tools import open_meteo, tomorrow_io, google_weather, openweathermap, accuweather, openai_llm, geographic_tools, crop_calendar_tools, alert_generation_tools
+# Import your tools
+from tools import (
+    open_meteo, 
+    tomorrow_io, 
+    google_weather, 
+    openweathermap, 
+    accuweather, 
+    openai_llm, 
+    geographic_tools, 
+    crop_calendar_tools, 
+    alert_generation_tools
+)
 from a2a_agents import sms_agent, whatsapp_agent, ussd_agent, ivr_agent, telegram_agent
 from utils.weather_utils import get_tool_config
 
-
+# Configuration
 config = dotenv_values(".env")
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-print("OPENAI_API_KEY exists?", os.getenv("OPENAI_API_KEY") is not None)
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Verify API keys
+openai_key = config.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not openai_key:
+    logger.warning("OpenAI API key not found - AI features will be limited")
+else:
+    logger.info("OpenAI API key found")
 
-app = FastAPI()
+app = FastAPI(title="MCP Weather Server", version="1.0.0")
 
-# CORS middleware for frontend
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://mcp-ui.vercel.app"],
+    allow_origins=["https://mcp-ui.vercel.app", "*"],  # Add * for development
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
 
+# Pydantic models
 class MCPRequest(BaseModel):
     tool: str
     parameters: dict
@@ -48,122 +63,297 @@ class WorkflowRequest(BaseModel):
     state: str
     district: str
 
-def get_regional_crop_for_area(district: str, state: str):
-    """Get typical crop for the region"""
-    if state.lower() == 'bihar':
-        district_crops = {
-            'patna': 'rice',
-            'gaya': 'wheat',
-            'bhagalpur': 'rice',
-            'muzaffarpur': 'sugarcane',
-            'darbhanga': 'rice',
-            'siwan': 'rice',
-            'begusarai': 'rice',
-            'katihar': 'maize',
-        }
-        return district_crops.get(district.lower(), 'rice')
-    return 'rice'
+# Crop calendar constants
+CROP_CALENDAR = {
+    "rice": {
+        "season": "Kharif",
+        "planting": "June-July",
+        "harvesting": "October-November",
+        "duration_days": 120,
+        "stages": ["Nursery/Seedling", "Transplanting", "Vegetative", "Tillering",
+                  "Panicle Initiation", "Flowering", "Milk/Dough", "Maturity", "Harvesting"]
+    },
+    "wheat": {
+        "season": "Rabi",
+        "planting": "November-December",
+        "harvesting": "March-April",
+        "duration_days": 120,
+        "stages": ["Sowing", "Germination", "Tillering", "Jointing", "Booting",
+                  "Heading", "Flowering", "Grain Filling", "Maturity", "Harvesting"]
+    },
+    "maize": {
+        "season": "Kharif/Zaid",
+        "planting": "June-July / March-April",
+        "harvesting": "September-October / June",
+        "duration_days": 110,
+        "stages": ["Sowing", "Emergence", "Vegetative", "Tasseling", "Silking",
+                  "Grain Filling", "Maturity", "Harvesting"]
+    },
+    "sugarcane": {
+        "season": "Annual",
+        "planting": "February-March",
+        "harvesting": "December-January",
+        "duration_days": 300,
+        "stages": ["Planting", "Germination", "Tillering", "Grand Growth",
+                  "Maturation", "Ripening", "Harvesting"]
+    },
+    "mustard": {
+        "season": "Rabi",
+        "planting": "October-November",
+        "harvesting": "February-March",
+        "duration_days": 110,
+        "stages": ["Sowing", "Germination", "Rosette", "Stem Elongation", 
+                  "Flowering", "Pod Formation", "Pod Filling", "Maturity", "Harvesting"]
+    }
+}
 
-def get_current_crop_stage(crop: str):
-    """Determine crop stage based on current date"""
+# District-specific crop preferences for Bihar
+DISTRICT_CROPS = {
+    'patna': {'primary': ['rice', 'wheat', 'potato'], 'secondary': ['mustard', 'gram'], 'specialty': ['sugarcane']},
+    'gaya': {'primary': ['wheat', 'rice'], 'secondary': ['barley', 'mustard'], 'specialty': ['gram']},
+    'bhagalpur': {'primary': ['rice', 'maize', 'wheat'], 'secondary': ['jute'], 'specialty': ['groundnut']},
+    'muzaffarpur': {'primary': ['sugarcane', 'rice', 'wheat'], 'secondary': ['potato', 'mustard'], 'specialty': ['lentil']},
+    'darbhanga': {'primary': ['rice', 'wheat', 'maize'], 'secondary': ['gram'], 'specialty': ['bajra']},
+    'siwan': {'primary': ['rice', 'wheat'], 'secondary': ['gram', 'lentil'], 'specialty': ['mustard']},
+    'begusarai': {'primary': ['rice', 'wheat'], 'secondary': ['jute', 'mustard'], 'specialty': ['moong']},
+    'katihar': {'primary': ['maize', 'rice'], 'secondary': ['jute'], 'specialty': ['jowar']}
+}
+
+def get_current_season(month: int) -> str:
+    """Determine current agricultural season"""
+    if month in [6, 7, 8, 9]:  # June to September
+        return 'kharif'
+    elif month in [10, 11, 12, 1, 2, 3]:  # October to March
+        return 'rabi'
+    else:  # April, May
+        return 'zaid'
+
+def select_regional_crop(district: str, state: str) -> str:
+    """Select appropriate crop based on district, season, and preferences"""
+    if state.lower() != 'bihar':
+        return 'rice'  # fallback
+    
     current_month = datetime.now().month
+    current_season = get_current_season(current_month)
     
-    if crop == 'rice':
-        if current_month in [6, 7]:
-            return 'planting'
-        elif current_month in [8, 9]:
-            return 'growing'
-        elif current_month in [10, 11]:
-            return 'flowering'
-        else:
-            return 'harvesting'
-    elif crop == 'wheat':
-        if current_month in [11, 12]:
-            return 'planting'
-        elif current_month in [1, 2]:
-            return 'growing'
-        elif current_month in [3, 4]:
-            return 'flowering'
-        else:
-            return 'harvesting'
-    elif crop == 'sugarcane':
-        if current_month in [2, 3, 4]:
-            return 'planting'
-        elif current_month in [5, 6, 7, 8]:
-            return 'growing'
-        elif current_month in [9, 10, 11]:
-            return 'maturing'
-        else:
-            return 'harvesting'
-    elif crop == 'maize':
-        if current_month in [6, 7]:
-            return 'planting'
-        elif current_month in [8, 9]:
-            return 'growing'
-        elif current_month in [10, 11]:
-            return 'flowering'
-        else:
-            return 'harvesting'
+    # Get district preferences
+    district_prefs = DISTRICT_CROPS.get(district.lower(), {
+        'primary': ['rice', 'wheat'], 
+        'secondary': ['gram'], 
+        'specialty': ['maize']
+    })
     
-    return 'growing'
+    # Season-specific crop filtering
+    seasonal_crops = {
+        'kharif': ['rice', 'maize', 'sugarcane', 'jowar', 'bajra', 'groundnut'],
+        'rabi': ['wheat', 'barley', 'gram', 'lentil', 'mustard', 'potato'],
+        'zaid': ['maize', 'moong', 'watermelon', 'cucumber']
+    }
+    
+    # Combine district and seasonal preferences
+    all_district_crops = (district_prefs.get('primary', []) + 
+                         district_prefs.get('secondary', []) + 
+                         district_prefs.get('specialty', []))
+    
+    suitable_crops = [crop for crop in all_district_crops 
+                     if crop in seasonal_crops.get(current_season, [])]
+    
+    if not suitable_crops:
+        suitable_crops = district_prefs.get('primary', ['rice'])
+    
+    # Weighted selection (primary crops more likely)
+    weighted_crops = []
+    for crop in suitable_crops:
+        if crop in district_prefs.get('primary', []):
+            weighted_crops.extend([crop] * 5)
+        elif crop in district_prefs.get('secondary', []):
+            weighted_crops.extend([crop] * 3)
+        else:
+            weighted_crops.extend([crop] * 1)
+    
+    selected_crop = random.choice(weighted_crops) if weighted_crops else 'rice'
+    logger.info(f"Selected crop: {selected_crop} for {district} in {current_season} season")
+    
+    return selected_crop
 
-async def generate_dynamic_alert(district: str, state: str):
-    """Generate dynamic alert data using geographic functions and REAL weather data"""
+def estimate_crop_stage(crop: str, current_month: int) -> str:
+    """Estimate current crop stage based on crop type and month"""
+    if crop not in CROP_CALENDAR:
+        return 'Growing'
+    
+    crop_data = CROP_CALENDAR[crop]
+    stages = crop_data['stages']
+    
+    # Month-based stage estimation
+    stage_mappings = {
+        'rice': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 8},
+        'wheat': {11: 0, 12: 1, 1: 2, 2: 3, 3: 4, 4: 5},
+        'maize': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 3: 0, 4: 1, 5: 2},
+        'sugarcane': {2: 0, 3: 1, 4: 2, 5: 3, 6: 3, 7: 3, 8: 4, 9: 4, 10: 5, 11: 6, 12: 6, 1: 6},
+        'mustard': {10: 0, 11: 1, 12: 2, 1: 3, 2: 4, 3: 5}
+    }
+    
+    crop_mapping = stage_mappings.get(crop, {})
+    stage_index = crop_mapping.get(current_month, len(stages) // 2)  # Default to middle stage
+    stage_index = min(stage_index, len(stages) - 1)
+    
+    return stages[stage_index] if stages else 'Growing'
+
+async def get_location_coordinates(village: str, district: str) -> tuple[list, str]:
+    """Get coordinates for village or district with fallback"""
+    location_coords = None
+    location_source = ""
+    
+    # Try village coordinates first
+    try:
+        village_location = await geographic_tools.reverse_geocode(village)
+        if "error" not in village_location and "lat" in village_location:
+            location_coords = [village_location["lat"], village_location["lng"]]
+            location_source = f"village_{village}"
+            logger.info(f"Using village coordinates for {village}: {location_coords}")
+    except Exception as e:
+        logger.warning(f"Village geocoding failed for {village}: {e}")
+    
+    # Fallback to district coordinates
+    if not location_coords:
+        try:
+            district_location = await geographic_tools.reverse_geocode(district)
+            if "error" not in district_location and "lat" in district_location:
+                location_coords = [district_location["lat"], district_location["lng"]]
+                location_source = f"district_{district}"
+                logger.info(f"Using district coordinates for {district}: {location_coords}")
+        except Exception as e:
+            logger.warning(f"District geocoding failed for {district}: {e}")
+    
+    # Final fallback
+    if not location_coords:
+        logger.warning(f"No coordinates found, using Patna fallback")
+        location_coords = [25.5941, 85.1376]  # Patna coordinates
+        location_source = "fallback_patna"
+    
+    return location_coords, location_source
+
+async def generate_weather_based_alert(weather_data: dict, crop: str, crop_stage: str, 
+                                     village: str, district: str) -> tuple[str, str, str, list]:
+    """Generate alert based on weather conditions"""
+    current_weather = weather_data.get('current_weather', {})
+    daily_forecast = weather_data.get('daily', {})
+    
+    current_temp = current_weather.get('temperature', 25)
+    current_windspeed = current_weather.get('windspeed', 10)
+    
+    precipitation_list = daily_forecast.get('precipitation_sum', [0, 0, 0])
+    next_3_days_rain = sum(precipitation_list[:3]) if precipitation_list else 0
+    
+    # Generate alert based on conditions
+    if next_3_days_rain > 25:
+        alert_type = "heavy_rain_warning"
+        urgency = "high"
+        alert_message = (f"Heavy rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days "
+                        f"near {village}, {district}. {crop} at {crop_stage} stage may be affected. "
+                        f"Delay fertilizer application and ensure proper drainage.")
+        action_items = ["delay_fertilizer", "check_drainage", "monitor_crops", "prepare_harvest_protection"]
+    
+    elif next_3_days_rain > 10:
+        alert_type = "moderate_rain_warning"
+        urgency = "medium"
+        alert_message = (f"Moderate rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days "
+                        f"near {village}, {district}. Monitor {crop} at {crop_stage} stage carefully.")
+        action_items = ["monitor_soil", "check_drainage", "adjust_irrigation"]
+    
+    elif next_3_days_rain < 2 and current_temp > 35:
+        alert_type = "heat_drought_warning"
+        urgency = "high"
+        alert_message = (f"High temperature ({current_temp:.1f}°C) with minimal rainfall expected "
+                        f"near {village}, {district}. {crop} at {crop_stage} stage needs extra care. "
+                        f"Increase irrigation frequency.")
+        action_items = ["increase_irrigation", "mulch_crops", "monitor_plant_stress"]
+    
+    elif current_temp < 10:
+        alert_type = "cold_warning"
+        urgency = "medium"
+        alert_message = (f"Low temperature ({current_temp:.1f}°C) expected near {village}, {district}. "
+                        f"Protect {crop} crops from cold damage.")
+        action_items = ["protect_crops", "cover_seedlings", "adjust_irrigation_timing"]
+    
+    elif current_windspeed > 30:
+        alert_type = "high_wind_warning"
+        urgency = "medium"
+        alert_message = (f"High winds ({current_windspeed:.1f} km/h) expected near {village}, {district}. "
+                        f"Secure {crop} crop supports and structures.")
+        action_items = ["secure_supports", "check_structures", "monitor_damage"]
+    
+    else:
+        alert_type = "weather_update"
+        urgency = "low"
+        alert_message = (f"Normal weather conditions expected near {village}, {district}. "
+                        f"{crop} at {crop_stage} stage. Temperature {current_temp:.1f}°C, "
+                        f"rainfall {next_3_days_rain:.1f}mm.")
+        action_items = ["routine_monitoring", "maintain_irrigation"]
+    
+    return alert_type, urgency, alert_message, action_items
+
+async def generate_ai_alert(latitude: float, longitude: float, crop: str, 
+                          crop_stage: str, village: str, district: str) -> Optional[dict]:
+    """Generate AI-powered weather alert using OpenAI"""
+    if not openai_key:
+        logger.warning("No OpenAI API key - skipping AI alert generation")
+        return None
     
     try:
-        # Step 1: Get villages for the district using your geographic tools
+        ai_alert = await alert_generation_tools.predict_weather_alert(
+            latitude=latitude,
+            longitude=longitude,
+            api_key=openai_key
+        )
+        
+        # Extract and enhance AI response
+        alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
+        impact_description = ai_alert.get('impact', 'Monitor crops regularly')
+        recommendations = ai_alert.get('recommendations', 'Continue routine farming activities')
+        
+        # Create enhanced alert message
+        alert_message = f"🤖 AI Weather Alert for {village}, {district}: {alert_description}"
+        if impact_description and impact_description.lower() not in ['none', 'n/a', '']:
+            alert_message += f" 🌾 Crop Impact ({crop} - {crop_stage}): {impact_description}"
+        
+        return {
+            'alert': alert_description,
+            'impact': impact_description,
+            'recommendations': recommendations,
+            'enhanced_message': alert_message
+        }
+        
+    except Exception as e:
+        logger.error(f"AI alert generation failed: {e}")
+        return None
+
+async def generate_dynamic_alert(district: str, state: str) -> dict:
+    """Main function to generate comprehensive weather alert"""
+    try:
+        # Step 1: Get villages for the district
         villages_data = await geographic_tools.list_villages(state, district)
         
         if "error" in villages_data:
             raise Exception(f"District '{district}' not found in {state}")
         
-        # Step 2: Pick a random village from the actual list
         available_villages = villages_data.get("villages", [])
         if not available_villages:
             raise Exception(f"No villages found for {district}")
         
+        # Step 2: Select random village
         selected_village = random.choice(available_villages)
         logger.info(f"Selected village: {selected_village} from {len(available_villages)} villages")
         
-        # Step 3: Try to get coordinates for the selected village first, then district
-        location_coords = None
-        location_source = ""
+        # Step 3: Get coordinates
+        location_coords, location_source = await get_location_coordinates(selected_village, district)
         
-        # Try village coordinates first
+        # Step 4: Generate crop selection and stage
+        regional_crop = select_regional_crop(district, state)
+        crop_stage = estimate_crop_stage(regional_crop, datetime.now().month)
+        
+        # Step 5: Get weather data
         try:
-            village_location = await geographic_tools.reverse_geocode(selected_village)
-            if "error" not in village_location and "lat" in village_location:
-                location_coords = [village_location["lat"], village_location["lng"]]
-                location_source = f"village_{selected_village}"
-                logger.info(f"Using village coordinates for {selected_village}: {location_coords}")
-        except Exception as e:
-            logger.warning(f"Village geocoding failed for {selected_village}: {e}")
-        
-        # Fallback to district coordinates if village lookup failed
-        if not location_coords:
-            try:
-                district_location = await geographic_tools.reverse_geocode(district)
-                if "error" not in district_location and "lat" in district_location:
-                    location_coords = [district_location["lat"], district_location["lng"]]
-                    location_source = f"district_{district}"
-                    logger.info(f"Using district coordinates for {district}: {location_coords}")
-            except Exception as e:
-                logger.warning(f"District geocoding failed for {district}: {e}")
-        
-        # Final fallback - but this should rarely happen now
-        if not location_coords:
-            logger.warning(f"No coordinates found for {selected_village} or {district}, using default")
-            location_coords = [25.5941, 85.1376]  # Patna fallback
-            location_source = "fallback_patna"
-        
-        # Step 4: Generate regional crop and stage using crop calendar data
-        regional_crop = await get_regional_crop_for_area(district, state)
-        crop_stage = await get_current_crop_stage_dynamic(regional_crop, district)
-        
-        # Step 5: GET REAL WEATHER DATA using the actual coordinates
-        try:
-            logger.info(f"Fetching weather for coordinates: {location_coords} (source: {location_source})")
-            
             current_weather_data = await open_meteo.get_current_weather(
                 latitude=location_coords[0], 
                 longitude=location_coords[1]
@@ -175,651 +365,51 @@ async def generate_dynamic_alert(district: str, state: str):
                 days=7
             )
             
-            current_weather = current_weather_data.get('current_weather', {})
-            daily_forecast = forecast_data.get('daily', {})
-            
-            current_temp = current_weather.get('temperature', 25)
-            current_windspeed = current_weather.get('windspeed', 10)
-            
-            precipitation_list = daily_forecast.get('precipitation_sum', [0, 0, 0])
-            next_3_days_rain = sum(precipitation_list[:3]) if precipitation_list else 0
-            
-            rain_probability = min(90, max(10, int(next_3_days_rain * 10))) if next_3_days_rain > 0 else 10
-            
-            # Higher precipitation = higher humidity estimate
-            estimated_humidity = min(95, max(40, 60 + int(next_3_days_rain * 2)))
-            
-            real_weather = {
-                "forecast_days": 3,
-                "rain_probability": rain_probability,
-                "expected_rainfall": f"{next_3_days_rain:.1f}mm",
-                "temperature": f"{current_temp:.1f}°C",
-                "humidity": f"{estimated_humidity}%",
-                "wind_speed": f"{current_windspeed:.1f} km/h",
-                "coordinates_source": location_source  # Track where coords came from
-            }
-            
-            # Step 6: Generate alert message based on actual weather conditions
-            if next_3_days_rain > 25:
-                alert_type = "heavy_rain_warning"
-                urgency = "high"
-                alert_message = f"Heavy rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days near {selected_village}, {district}. Delay fertilizer application. Ensure proper drainage."
-                action_items = ["delay_fertilizer", "check_drainage", "monitor_crops", "prepare_harvest_protection"]
-            elif next_3_days_rain > 10:
-                alert_type = "moderate_rain_warning"
-                urgency = "medium"
-                alert_message = f"Moderate rainfall ({next_3_days_rain:.1f}mm) expected in next 3 days near {selected_village}, {district}. Monitor soil moisture levels."
-                action_items = ["monitor_soil", "check_drainage", "adjust_irrigation"]
-            elif next_3_days_rain < 2 and current_temp > 35:
-                alert_type = "heat_drought_warning"
-                urgency = "high"
-                alert_message = f"High temperature ({current_temp:.1f}°C) with minimal rainfall expected near {selected_village}, {district}. Increase irrigation frequency."
-                action_items = ["increase_irrigation", "mulch_crops", "monitor_plant_stress"]
-            elif current_temp < 10:
-                alert_type = "cold_warning"
-                urgency = "medium"
-                alert_message = f"Low temperature ({current_temp:.1f}°C) expected near {selected_village}, {district}. Protect crops from cold damage."
-                action_items = ["protect_crops", "cover_seedlings", "adjust_irrigation_timing"]
-            elif current_windspeed > 30:
-                alert_type = "high_wind_warning"
-                urgency = "medium"
-                alert_message = f"High winds ({current_windspeed:.1f} km/h) expected near {selected_village}, {district}. Secure crop supports and structures."
-                action_items = ["secure_supports", "check_structures", "monitor_damage"]
-            else:
-                alert_type = "weather_update"
-                urgency = "low"
-                alert_message = f"Normal weather conditions expected near {selected_village}, {district}. Temperature {current_temp:.1f}°C, rainfall {next_3_days_rain:.1f}mm."
-                action_items = ["routine_monitoring", "maintain_irrigation"]
-            
-            logger.info(f"Real weather data retrieved for {selected_village}, {district}: {current_temp}°C, {next_3_days_rain:.1f}mm rain (coords: {location_coords})")
+            logger.info(f"Weather data retrieved for {selected_village}, {district}")
             
         except Exception as weather_error:
-            logger.error(f"Failed to get real weather data for {selected_village}, {district}: {weather_error}")
-            raise Exception(f"Unable to retrieve current weather conditions for {selected_village}, {district}")
+            logger.error(f"Failed to get weather data: {weather_error}")
+            raise Exception(f"Unable to retrieve weather conditions for {selected_village}, {district}")
         
-        return {
-            "alert_id": f"{state.upper()[:2]}_{district.upper()[:3]}_{selected_village.upper()[:3]}_{datetime.now().strftime('%Y%m%d_%H%M')}",
-            "timestamp": datetime.now().isoformat() + "Z",
-            "location": {
-                "village": selected_village,
-                "district": district,
-                "state": state.capitalize(),
-                "coordinates": location_coords,
-                "coordinates_source": location_source,
-                "total_villages_in_district": len(available_villages)
-            },
-            "crop": {
-                "name": regional_crop,
-                "stage": crop_stage,
-                "planted_estimate": "2025-06-15"  # You could make this dynamic too
-            },
-            "alert": {
-                "type": alert_type,
-                "urgency": urgency,
-                "message": alert_message,
-                "action_items": action_items,
-                "valid_until": (datetime.now() + timedelta(days=3)).isoformat() + "Z"
-            },
-            "weather": real_weather,
-            "data_source": "open_meteo_api_with_dynamic_location"
+        # Step 6: Generate alerts
+        alert_type, urgency, alert_message, action_items = await generate_weather_based_alert(
+            {'current_weather': current_weather_data.get('current_weather', {}),
+             'daily': forecast_data.get('daily', {})},
+            regional_crop, crop_stage, selected_village, district
+        )
+        
+        # Step 7: Try to enhance with AI if available
+        ai_analysis = await generate_ai_alert(
+            location_coords[0], location_coords[1], 
+            regional_crop, crop_stage, selected_village, district
+        )
+        
+        # Step 8: Prepare weather context
+        current_weather = current_weather_data.get('current_weather', {})
+        daily_forecast = forecast_data.get('daily', {})
+        
+        current_temp = current_weather.get('temperature', 25)
+        current_windspeed = current_weather.get('windspeed', 10)
+        precipitation_list = daily_forecast.get('precipitation_sum', [0, 0, 0])
+        next_3_days_rain = sum(precipitation_list[:3]) if precipitation_list else 0
+        rain_probability = min(90, max(10, int(next_3_days_rain * 10))) if next_3_days_rain > 0 else 10
+        estimated_humidity = min(95, max(40, 60 + int(next_3_days_rain * 2)))
+        
+        weather_context = {
+            "forecast_days": 7,
+            "rain_probability": rain_probability,
+            "expected_rainfall": f"{next_3_days_rain:.1f}mm",
+            "temperature": f"{current_temp:.1f}°C",
+            "humidity": f"{estimated_humidity}%",
+            "wind_speed": f"{current_windspeed:.1f} km/h",
+            "coordinates_source": location_source
         }
-    
-    except Exception as e:
-        logger.error(f"Error generating dynamic alert for {district}, {state}: {e}")
-        raise Exception(f"Failed to generate weather alert for {district}: {str(e)}")
-
-
-
-
-import random
-from datetime import datetime, date
-
-# Enhanced crop selection function using your crop calendar data
-async def get_regional_crop_for_area(district: str, state: str):
-    """Get typical crop for the region based on season and district - now fully dynamic"""
-    
-    if state.lower() != 'bihar':
-        return 'rice'  # fallback for other states
-    
-    current_month = datetime.now().month
-    current_season = get_current_season(current_month)
-    
-    # Get crops that are currently in season using your crop calendar tools
-    try:
-        seasonal_crops_data = await crop_calendar_tools.get_prominent_crops('bihar', current_season)
-        if "error" not in seasonal_crops_data:
-            seasonal_crops = seasonal_crops_data.get('crops', [])
-        else:
-            seasonal_crops = []
-    except Exception as e:
-        logger.warning(f"Failed to get seasonal crops: {e}")
-        seasonal_crops = []
-    
-    # District-specific crop preferences (what's commonly grown in each district)
-    district_crop_preferences = {
-        'patna': {
-            'primary': ['rice', 'wheat', 'potato'],
-            'secondary': ['mustard', 'gram', 'barley'],
-            'specialty': ['sugarcane']
-        },
-        'gaya': {
-            'primary': ['wheat', 'rice', 'gram'],
-            'secondary': ['barley', 'lentil', 'mustard'],
-            'specialty': ['arhar']
-        },
-        'bhagalpur': {
-            'primary': ['rice', 'maize', 'wheat'],
-            'secondary': ['jute', 'urd', 'moong'],
-            'specialty': ['groundnut']
-        },
-        'muzaffarpur': {
-            'primary': ['sugarcane', 'rice', 'wheat'],
-            'secondary': ['potato', 'mustard'],
-            'specialty': ['lentil']
-        },
-        'darbhanga': {
-            'primary': ['rice', 'wheat', 'maize'],
-            'secondary': ['gram', 'arhar'],
-            'specialty': ['bajra']
-        },
-        'siwan': {
-            'primary': ['rice', 'wheat'],
-            'secondary': ['gram', 'lentil', 'pea'],
-            'specialty': ['mustard']
-        },
-        'begusarai': {
-            'primary': ['rice', 'wheat'],
-            'secondary': ['jute', 'mustard'],
-            'specialty': ['moong', 'urd']
-        },
-        'katihar': {
-            'primary': ['maize', 'rice'],
-            'secondary': ['jute', 'urd', 'moong'],
-            'specialty': ['jowar', 'bajra']
-        },
-        'vaishali': {
-            'primary': ['rice', 'wheat', 'sugarcane'],
-            'secondary': ['potato', 'gram'],
-            'specialty': ['mustard']
-        },
-        'madhubani': {
-            'primary': ['rice', 'wheat', 'maize'],
-            'secondary': ['gram', 'lentil'],
-            'specialty': ['arhar']
-        }
-    }
-    
-    # Get district preferences or use default
-    district_prefs = district_crop_preferences.get(district.lower(), {
-        'primary': ['rice', 'wheat'],
-        'secondary': ['gram', 'mustard'],
-        'specialty': ['maize']
-    })
-    
-    # Combine all possible crops for this district
-    all_district_crops = (district_prefs.get('primary', []) + 
-                         district_prefs.get('secondary', []) + 
-                         district_prefs.get('specialty', []))
-    
-    # Find crops that are both seasonal AND grown in this district
-    suitable_crops = []
-    if seasonal_crops:
-        suitable_crops = [crop for crop in all_district_crops if crop in seasonal_crops]
-    
-    # If no seasonal match, use district preferences with seasonal weighting
-    if not suitable_crops:
-        if current_season == 'kharif':
-            # Monsoon crops preference
-            kharif_crops = ['rice', 'maize', 'arhar', 'moong', 'urd', 'jowar', 'bajra', 'groundnut', 'soybean']
-            suitable_crops = [crop for crop in all_district_crops if crop in kharif_crops]
-        elif current_season == 'rabi':
-            # Winter crops preference
-            rabi_crops = ['wheat', 'barley', 'gram', 'lentil', 'pea', 'mustard', 'linseed', 'potato']
-            suitable_crops = [crop for crop in all_district_crops if crop in rabi_crops]
-        elif current_season == 'zaid':
-            # Summer crops preference
-            zaid_crops = ['maize', 'moong', 'urd', 'watermelon', 'cucumber']
-            suitable_crops = [crop for crop in all_district_crops if crop in zaid_crops]
-    
-    # If still no match, fall back to district primary crops
-    if not suitable_crops:
-        suitable_crops = district_prefs.get('primary', ['rice'])
-    
-    # Weight selection based on crop category (primary crops more likely)
-    weighted_crops = []
-    for crop in suitable_crops:
-        if crop in district_prefs.get('primary', []):
-            weighted_crops.extend([crop] * 5)  # 5x weight for primary crops
-        elif crop in district_prefs.get('secondary', []):
-            weighted_crops.extend([crop] * 3)  # 3x weight for secondary crops
-        else:
-            weighted_crops.extend([crop] * 1)  # 1x weight for specialty crops
-    
-    selected_crop = random.choice(weighted_crops) if weighted_crops else 'rice'
-    
-    logger.info(f"Selected crop: {selected_crop} for {district} in {current_season} season from options: {suitable_crops}")
-    
-    return selected_crop
-
-
-async def get_current_crop_stage_dynamic(crop: str, district: str = None):
-    """Determine crop stage based on current date and crop calendar - now more accurate"""
-    
-    try:
-        # Get crop calendar information
-        crop_info = await crop_calendar_tools.get_crop_calendar('bihar', crop)
         
-        if "error" in crop_info:
-            # Fallback to the old static method
-            return get_current_crop_stage_static(crop)
-        
-        # Parse planting and harvesting periods
-        planting_period = crop_info.get('planting', '')
-        season = crop_info.get('season', '')
-        stages = crop_info.get('stages', [])
-        
-        current_month = datetime.now().month
-        current_date = date.today()
-        
-        # Estimate planting date based on season and current month
-        estimated_plant_date = estimate_planting_date(crop, season, planting_period, current_month)
-        
-        if estimated_plant_date:
-            # Use the crop calendar function to estimate stage
-            try:
-                stage_data = await crop_calendar_tools.estimate_crop_stage(
-                    crop, 
-                    estimated_plant_date.isoformat(), 
-                    current_date.isoformat()
-                )
-                
-                if "error" not in stage_data:
-                    stage = stage_data.get('stage', stages[0] if stages else 'Growing')
-                    logger.info(f"Dynamic stage calculation for {crop}: {stage} (planted ~{estimated_plant_date})")
-                    return stage
-            except Exception as e:
-                logger.warning(f"Error in dynamic stage calculation: {e}")
-        
-        # Fallback to month-based estimation
-        return estimate_stage_by_month(crop, current_month, stages)
-    
-    except Exception as e:
-        logger.error(f"Error in dynamic crop stage calculation: {e}")
-        return get_current_crop_stage_static(crop)
-
-
-def get_current_season(month: int):
-    """Determine current agricultural season"""
-    if month in [6, 7, 8, 9]:  # June to September
-        return 'kharif'
-    elif month in [10, 11, 12, 1, 2, 3]:  # October to March
-        return 'rabi'
-    else:  # April, May
-        return 'zaid'
-
-async def get_regional_crop_for_area(district: str, state: str):
-    """Get typical crop for the region based on season and district - now fully dynamic"""
-    
-    if state.lower() != 'bihar':
-        return 'rice'  # fallback for other states
-    
-    current_month = datetime.now().month
-    current_season = get_current_season(current_month)
-    
-    # Get crops that are currently in season using your crop calendar tools
-    try:
-        seasonal_crops_data = await crop_calendar_tools.get_prominent_crops('bihar', current_season)
-        if "error" not in seasonal_crops_data:
-            seasonal_crops = seasonal_crops_data.get('crops', [])
-        else:
-            seasonal_crops = []
-    except Exception as e:
-        logger.warning(f"Failed to get seasonal crops: {e}")
-        seasonal_crops = []
-    
-    # District-specific crop preferences
-    district_crop_preferences = {
-        'patna': {'primary': ['rice', 'wheat', 'potato'], 'secondary': ['mustard', 'gram', 'barley'], 'specialty': ['sugarcane']},
-        'gaya': {'primary': ['wheat', 'rice', 'gram'], 'secondary': ['barley', 'lentil', 'mustard'], 'specialty': ['arhar']},
-        'bhagalpur': {'primary': ['rice', 'maize', 'wheat'], 'secondary': ['jute', 'urd', 'moong'], 'specialty': ['groundnut']},
-        'muzaffarpur': {'primary': ['sugarcane', 'rice', 'wheat'], 'secondary': ['potato', 'mustard'], 'specialty': ['lentil']},
-        'darbhanga': {'primary': ['rice', 'wheat', 'maize'], 'secondary': ['gram', 'arhar'], 'specialty': ['bajra']},
-        'siwan': {'primary': ['rice', 'wheat'], 'secondary': ['gram', 'lentil', 'pea'], 'specialty': ['mustard']},
-        'begusarai': {'primary': ['rice', 'wheat'], 'secondary': ['jute', 'mustard'], 'specialty': ['moong', 'urd']},
-        'katihar': {'primary': ['maize', 'rice'], 'secondary': ['jute', 'urd', 'moong'], 'specialty': ['jowar', 'bajra']}
-    }
-    
-    district_prefs = district_crop_preferences.get(district.lower(), {'primary': ['rice', 'wheat'], 'secondary': ['gram', 'mustard'], 'specialty': ['maize']})
-    
-    all_district_crops = (district_prefs.get('primary', []) + district_prefs.get('secondary', []) + district_prefs.get('specialty', []))
-    
-    # Find crops that are both seasonal AND grown in this district
-    suitable_crops = []
-    if seasonal_crops:
-        suitable_crops = [crop for crop in all_district_crops if crop in seasonal_crops]
-    
-    # If no seasonal match, use season-based fallback
-    if not suitable_crops:
-        if current_season == 'kharif':
-            kharif_crops = ['rice', 'maize', 'arhar', 'moong', 'urd', 'jowar', 'bajra', 'groundnut', 'soybean']
-            suitable_crops = [crop for crop in all_district_crops if crop in kharif_crops]
-        elif current_season == 'rabi':
-            rabi_crops = ['wheat', 'barley', 'gram', 'lentil', 'pea', 'mustard', 'linseed', 'potato']
-            suitable_crops = [crop for crop in all_district_crops if crop in rabi_crops]
-        elif current_season == 'zaid':
-            zaid_crops = ['maize', 'moong', 'urd', 'watermelon', 'cucumber']
-            suitable_crops = [crop for crop in all_district_crops if crop in zaid_crops]
-    
-    if not suitable_crops:
-        suitable_crops = district_prefs.get('primary', ['rice'])
-    
-    # Weight selection based on crop category
-    weighted_crops = []
-    for crop in suitable_crops:
-        if crop in district_prefs.get('primary', []):
-            weighted_crops.extend([crop] * 5)  # 5x weight for primary crops
-        elif crop in district_prefs.get('secondary', []):
-            weighted_crops.extend([crop] * 3)  # 3x weight for secondary crops
-        else:
-            weighted_crops.extend([crop] * 1)  # 1x weight for specialty crops
-    
-    selected_crop = random.choice(weighted_crops) if weighted_crops else 'rice'
-    logger.info(f"Selected crop: {selected_crop} for {district} in {current_season} season")
-    
-    return selected_crop
-
-async def get_current_crop_stage_dynamic(crop: str, district: str = None):
-    """Determine crop stage based on current date and crop calendar"""
-    try:
-        crop_info = await crop_calendar_tools.get_crop_calendar('bihar', crop)
-        
-        if "error" in crop_info:
-            return get_current_crop_stage_static(crop)
-        
-        stages = crop_info.get('stages', [])
-        planting_period = crop_info.get('planting', '')
-        current_month = datetime.now().month
-        current_date = date.today()
-        
-        estimated_plant_date = estimate_planting_date(crop, planting_period, current_month)
-        
-        if estimated_plant_date:
-            try:
-                stage_data = await crop_calendar_tools.estimate_crop_stage(
-                    crop, estimated_plant_date.isoformat(), current_date.isoformat()
-                )
-                
-                if "error" not in stage_data:
-                    return stage_data.get('stage', stages[0] if stages else 'Growing')
-            except Exception as e:
-                logger.warning(f"Error in dynamic stage calculation: {e}")
-        
-        return estimate_stage_by_month(crop, current_month, stages)
-    
-    except Exception as e:
-        logger.error(f"Error in dynamic crop stage calculation: {e}")
-        return get_current_crop_stage_static(crop)
-
-def estimate_planting_date(crop: str, planting_period: str, current_month: int):
-    """Estimate when the crop was likely planted"""
-    current_year = datetime.now().year
-    
-    try:
-        if 'june' in planting_period.lower():
-            return date(current_year, 6, 15) if current_month >= 6 else date(current_year - 1, 6, 15)
-        elif 'november' in planting_period.lower():
-            if current_month >= 11:
-                return date(current_year, 11, 15)
-            elif current_month <= 4:
-                return date(current_year - 1, 11, 15)
-            else:
-                return date(current_year, 11, 15)
-        elif 'october' in planting_period.lower():
-            if current_month >= 10:
-                return date(current_year, 10, 15)
-            elif current_month <= 4:
-                return date(current_year - 1, 10, 15)
-            else:
-                return date(current_year, 10, 15)
-        elif 'march' in planting_period.lower():
-            if current_month >= 3 and current_month <= 8:
-                return date(current_year, 3, 15)
-            else:
-                return date(current_year - 1, 3, 15)
-    except Exception as e:
-        logger.warning(f"Error estimating planting date: {e}")
-    
-    return None
-
-def estimate_stage_by_month(crop: str, current_month: int, stages: list):
-    """Estimate crop stage based on current month"""
-    if not stages:
-        return 'Growing'
-    
-    stage_mappings = {
-        'rice': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 8},
-        'wheat': {11: 0, 12: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8},
-        'maize': {6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5, 12: 6, 1: 7, 2: 7, 3: 0, 4: 1, 5: 2}
-    }
-    
-    crop_mapping = stage_mappings.get(crop, {})
-    stage_index = crop_mapping.get(current_month, 2)
-    stage_index = min(stage_index, len(stages) - 1)
-    
-    return stages[stage_index] if stage_index < len(stages) else stages[-1]
-
-def get_current_crop_stage_static(crop: str):
-    """Original static crop stage function as fallback"""
-    current_month = datetime.now().month
-    
-    if crop == 'rice':
-        if current_month in [6, 7]:
-            return 'Transplanting'
-        elif current_month in [8, 9]:
-            return 'Vegetative'
-        elif current_month in [10, 11]:
-            return 'Flowering'
-        else:
-            return 'Maturity'
-    elif crop == 'wheat':
-        if current_month in [11, 12]:
-            return 'Sowing'
-        elif current_month in [1, 2]:
-            return 'Tillering'
-        elif current_month in [3, 4]:
-            return 'Flowering'
-        else:
-            return 'Harvesting'
-    elif crop == 'sugarcane':
-        if current_month in [2, 3, 4]:
-            return 'Planting'
-        elif current_month in [5, 6, 7, 8]:
-            return 'Vegetative'
-        elif current_month in [9, 10, 11]:
-            return 'Maturity'
-        else:
-            return 'Harvesting'
-    elif crop == 'maize':
-        if current_month in [6, 7]:
-            return 'Sowing'
-        elif current_month in [8, 9]:
-            return 'Vegetative'
-        elif current_month in [10, 11]:
-            return 'Grain Filling'
-        else:
-            return 'Harvesting'
-    
-    return 'Growing'
-
-# 
-
-async def generate_dynamic_alert(district: str, state: str):
-    """Generate AI-powered dynamic alert data using real weather and crop intelligence"""
-    
-    try:
-        # Step 1: Get villages for the district
-        villages_data = await geographic_tools.list_villages(state, district)
-        
-        if "error" in villages_data:
-            raise Exception(f"District '{district}' not found in {state}")
-        
-        # Step 2: Pick a random village from the actual list
-        available_villages = villages_data.get("villages", [])
-        if not available_villages:
-            raise Exception(f"No villages found for {district}")
-        
-        selected_village = random.choice(available_villages)
-        logger.info(f"Selected village: {selected_village} from {len(available_villages)} villages")
-        
-        # Step 3: Get coordinates for the selected village/district
-        location_coords = None
-        location_source = ""
-        
-        # Try village coordinates first
-        try:
-            village_location = await geographic_tools.reverse_geocode(selected_village)
-            if "error" not in village_location and "lat" in village_location:
-                location_coords = [village_location["lat"], village_location["lng"]]
-                location_source = f"village_{selected_village}"
-                logger.info(f"Using village coordinates for {selected_village}: {location_coords}")
-        except Exception as e:
-            logger.warning(f"Village geocoding failed for {selected_village}: {e}")
-        
-        # Fallback to district coordinates if village lookup failed
-        if not location_coords:
-            try:
-                district_location = await geographic_tools.reverse_geocode(district)
-                if "error" not in district_location and "lat" in district_location:
-                    location_coords = [district_location["lat"], district_location["lng"]]
-                    location_source = f"district_{district}"
-                    logger.info(f"Using district coordinates for {district}: {location_coords}")
-            except Exception as e:
-                logger.warning(f"District geocoding failed for {district}: {e}")
-        
-        # Final fallback
-        if not location_coords:
-            logger.warning(f"No coordinates found for {selected_village} or {district}, using default")
-            location_coords = [25.5941, 85.1376]  # Patna fallback
-            location_source = "fallback_patna"
-        
-        # Step 4: Generate dynamic crop selection and stage
-        regional_crop = await get_regional_crop_for_area(district, state)
-        crop_stage = await get_current_crop_stage_dynamic(regional_crop, district)
-        
-        # Step 5: GET AI-POWERED WEATHER ALERT using your alert_generation_tools
-        try:
-            logger.info(f"Generating AI-powered alert for coordinates: {location_coords} (source: {location_source})")
-            
-            # Get the API key
-            api_key = config.get("OPENAI_API_KEY")
-            if not api_key:
-                raise Exception("OpenAI API key not found")
-            
-            # Use your AI prediction tool
-            ai_alert = await alert_generation_tools.predict_weather_alert(
-                latitude=location_coords[0],
-                longitude=location_coords[1],
-                api_key=api_key
-            )
-            
-            logger.info(f"AI alert generated successfully for {selected_village}, {district}")
-            
-            # Also get basic weather data for additional context
-            try:
-                current_weather_data = await open_meteo.get_current_weather(
-                    latitude=location_coords[0], 
-                    longitude=location_coords[1]
-                )
-                
-                forecast_data = await open_meteo.get_weather_forecast(
-                    latitude=location_coords[0], 
-                    longitude=location_coords[1],
-                    days=7
-                )
-                
-                current_weather = current_weather_data.get('current_weather', {})
-                daily_forecast = forecast_data.get('daily', {})
-                
-                current_temp = current_weather.get('temperature', 25)
-                current_windspeed = current_weather.get('windspeed', 10)
-                
-                precipitation_list = daily_forecast.get('precipitation_sum', [0, 0, 0])
-                next_3_days_rain = sum(precipitation_list[:3]) if precipitation_list else 0
-                
-                rain_probability = min(90, max(10, int(next_3_days_rain * 10))) if next_3_days_rain > 0 else 10
-                estimated_humidity = min(95, max(40, 60 + int(next_3_days_rain * 2)))
-                
-                weather_context = {
-                    "forecast_days": 7,
-                    "rain_probability": rain_probability,
-                    "expected_rainfall": f"{next_3_days_rain:.1f}mm",
-                    "temperature": f"{current_temp:.1f}°C",
-                    "humidity": f"{estimated_humidity}%",
-                    "wind_speed": f"{current_windspeed:.1f} km/h",
-                    "coordinates_source": location_source
-                }
-                
-            except Exception as weather_error:
-                logger.warning(f"Could not get basic weather data: {weather_error}")
-                weather_context = {
-                    "forecast_days": 7,
-                    "coordinates_source": location_source,
-                    "note": "Weather context limited due to API error"
-                }
-            
-            # Extract AI analysis
-            alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
-            impact_description = ai_alert.get('impact', 'Monitor crops regularly')
-            recommendations = ai_alert.get('recommendations', 'Continue routine farming activities')
-            
-            # Create comprehensive alert message combining AI insights
-            alert_message = f"🤖 AI Weather Alert for {selected_village}, {district}: {alert_description}"
-            if impact_description and impact_description.lower() not in ['none', 'n/a', '']:
-                alert_message += f" 🌾 Crop Impact: {impact_description}"
-            
-            # Determine urgency and type based on AI response content
-            urgency = "low"
-            alert_type = "weather_update"
-            
-            alert_lower = alert_description.lower()
-            impact_lower = impact_description.lower()
-            recommendations_lower = recommendations.lower()
-            
-            # High urgency keywords
-            if any(word in alert_lower + impact_lower for word in ['urgent', 'severe', 'critical', 'danger', 'emergency', 'immediate']):
-                urgency = "high"
-                alert_type = "severe_weather_warning"
-            # Medium urgency keywords  
-            elif any(word in alert_lower + impact_lower for word in ['warning', 'caution', 'alert', 'risk', 'damage', 'loss', 'stress', 'threat']):
-                urgency = "medium"
-                alert_type = "weather_warning"
-            # Check recommendations for urgency indicators
-            elif any(word in recommendations_lower for word in ['immediate', 'urgent', 'quickly', 'soon', 'now']):
-                urgency = "medium"
-                alert_type = "crop_risk_alert"
-            
-            # Parse recommendations into actionable items
-            action_items = []
-            if recommendations:
-                # Split recommendations by common delimiters and clean up
-                items = recommendations.replace('.', '|').replace(',', '|').replace(';', '|').replace(' and ', '|').split('|')
-                action_items = [item.strip().lower().replace(' ', '_') for item in items if item.strip() and len(item.strip()) > 3]
-                # Limit to 5 most important items and ensure they're actionable
-                action_items = [item for item in action_items[:5] if any(verb in item for verb in ['monitor', 'check', 'apply', 'water', 'harvest', 'plant', 'protect', 'cover', 'drain', 'spray', 'fertilize'])]
-            
-            if not action_items:
-                action_items = ["monitor_crops", "follow_weather_updates", "maintain_irrigation"]
-            
-            logger.info(f"AI-powered alert processed: Type={alert_type}, Urgency={urgency}, Actions={len(action_items)}")
-            
-        except Exception as ai_error:
-            logger.error(f"Failed to get AI weather alert for {selected_village}, {district}: {ai_error}")
-            raise Exception(f"Unable to generate AI weather alert: {str(ai_error)}")
-        
-        # Generate unique alert ID with timestamp
+        # Generate unique alert ID
         alert_id = f"{state.upper()[:2]}_{district.upper()[:3]}_{selected_village.upper()[:3]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
-        return {
+        # Build final response
+        result = {
             "alert_id": alert_id,
             "timestamp": datetime.now().isoformat() + "Z",
             "location": {
@@ -834,285 +424,188 @@ async def generate_dynamic_alert(district: str, state: str):
                 "name": regional_crop,
                 "stage": crop_stage,
                 "season": get_current_season(datetime.now().month),
-                "planted_estimate": "2025-06-15"  # Could make this dynamic based on crop calendar
+                "planted_estimate": "2025-06-15"
             },
             "alert": {
                 "type": alert_type,
                 "urgency": urgency,
-                "message": alert_message,
+                "message": ai_analysis['enhanced_message'] if ai_analysis else alert_message,
                 "action_items": action_items,
                 "valid_until": (datetime.now() + timedelta(days=3)).isoformat() + "Z",
-                "ai_generated": True
-            },
-            "ai_analysis": {
-                "alert": alert_description,
-                "impact": impact_description,
-                "recommendations": recommendations
+                "ai_generated": ai_analysis is not None
             },
             "weather": weather_context,
-            "data_source": "ai_powered_openai_gpt4_with_open_meteo"
+            "data_source": "open_meteo_api_with_ai_enhancement" if ai_analysis else "open_meteo_api"
         }
-    
+        
+        if ai_analysis:
+            result["ai_analysis"] = {
+                "alert": ai_analysis['alert'],
+                "impact": ai_analysis['impact'],
+                "recommendations": ai_analysis['recommendations']
+            }
+        
+        return result
+        
     except Exception as e:
-        logger.error(f"Error generating AI-powered alert for {district}, {state}: {e}")
-        raise Exception(f"Failed to generate AI weather alert for {district}: {str(e)}")
+        logger.error(f"Error generating alert for {district}, {state}: {e}")
+        raise Exception(f"Failed to generate weather alert for {district}: {str(e)}")
 
+# API Routes
 @app.get("/")
 async def root():
-    return {"message": "MCP Weather Server is running"}
+    return {"message": "MCP Weather Server v1.0 - AI-Powered Agricultural Alerts", "status": "running"}
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "message": "API is working"}
+    return {
+        "status": "healthy", 
+        "message": "API is working",
+        "openai_available": openai_key is not None,
+        "timestamp": datetime.now().isoformat()
+    }
 
-#  workflow endpoint for frontend
 @app.post("/api/run-workflow")
 async def run_workflow(request: WorkflowRequest):
+    """Main workflow endpoint for generating comprehensive agricultural alerts"""
     logger.info(f"Received workflow request: {request.state}, {request.district}")
     
-    # Initialize variables
-    sample_alert = None
-    csv_content = ""
+    workflow_results = []
     
     try:
-        # Create comprehensive workflow response
-        workflow_results = []
+        # Workflow header
+        workflow_results.extend([
+            f"🌾 Agricultural Alert Workflow for {request.district.title()}, {request.state.title()}",
+            "=" * 70,
+            "",
+            "🌤️ Weather Data Collection",
+            "-" * 30
+        ])
         
-        # Add workflow header
-        workflow_results.append(f"Workflow for {request.district}, {request.state}")
-        workflow_results.append("=" * 50)
+        # Generate dynamic alert
+        sample_alert = await generate_dynamic_alert(request.district, request.state)
         
-        # weather data collection
-        workflow_results.append("\n🌤️ Weather Data Collection")
-        workflow_results.append("-" * 30)
-        workflow_results.append("📡 Fetching real-time weather data...")
+        workflow_results.extend([
+            "✅ Weather data retrieved successfully",
+            f"   📍 Location: {sample_alert['location']['village']}, {sample_alert['location']['district']}",
+            f"   🌡️ Temperature: {sample_alert['weather']['temperature']}",
+            f"   🌧️ Expected Rainfall: {sample_alert['weather']['expected_rainfall']}",
+            f"   💨 Wind Speed: {sample_alert['weather']['wind_speed']}",
+            f"   🌾 Crop: {sample_alert['crop']['name']} ({sample_alert['crop']['stage']})",
+            f"   🚨 Alert Type: {sample_alert['alert']['type']} - {sample_alert['alert']['urgency'].upper()} priority",
+            ""
+        ])
         
-        try:
-            sample_alert = await generate_dynamic_alert(request.district, request.state)
+        # Generate agent responses
+        agents = [
+            ("📱 WhatsApp Agent", whatsapp_agent.create_whatsapp_message),
+            ("📱 SMS Agent", sms_agent.create_sms_message),
+            ("📞 USSD Agent", ussd_agent.create_ussd_menu),
+            ("🎙️ IVR Agent", ivr_agent.create_ivr_script),
+            ("🤖 Telegram Agent", telegram_agent.create_telegram_message)
+        ]
+        
+        agent_responses = {}
+        
+        for agent_name, agent_func in agents:
+            workflow_results.extend([agent_name, "-" * 30])
+            try:
+                response = agent_func(sample_alert)
+                workflow_results.append("✅ Message generated successfully")
+                agent_responses[agent_name] = response
+                
+                # Add preview for some agents
+                if "WhatsApp" in agent_name:
+                    text = response.get('text', 'N/A')
+                    workflow_results.append(f"   Preview: {text[:100]}..." if len(text) > 100 else f"   Preview: {text}")
+                elif "SMS" in agent_name:
+                    workflow_results.append(f"   Preview: {str(response)[:100]}...")
+                
+            except Exception as e:
+                workflow_results.append(f"❌ Error: {str(e)}")
+                agent_responses[agent_name] = f"Error: {str(e)}"
             
-            workflow_results.append("✅ Current weather data retrieved from Open-Meteo API")
-            workflow_results.append("✅ 7-day forecast collected")
-            workflow_results.append("✅ Agricultural indices calculated")
-            
-        except Exception as weather_error:
-            logger.error(f"Weather data error: {weather_error}")
-            workflow_results.append(f"❌ Weather data collection failed: {str(weather_error)}")
-            return {
-                "message": "\n".join(workflow_results),
-                "status": "error",
-                "csv": "",
-                "error": f"Unable to retrieve weather data: {str(weather_error)}"
-            }
-        
-        if not sample_alert:
-            return {
-                "message": "Failed to generate alert data",
-                "status": "error", 
-                "csv": "",
-                "error": "Alert generation failed"
-            }
-        
-        # Alert generation
-        workflow_results.append("\n🚨 Alert Generation")
-        workflow_results.append("-" * 30)
-        workflow_results.append("✅ Weather alerts generated")
-        workflow_results.append(f"   - Data Source: {sample_alert.get('data_source', 'API')}")
-        workflow_results.append(f"   - Alert Type: {sample_alert['alert']['type']}")
-        workflow_results.append(f"   - Severity: {sample_alert['alert']['urgency']}")
-        workflow_results.append(f"   - Village: {sample_alert['location']['village']}")
-        workflow_results.append(f"   - Coordinates: {sample_alert['location']['coordinates']}")
-        workflow_results.append(f"   - Crop: {sample_alert['crop']['name']} ({sample_alert['crop']['stage']})")
-        workflow_results.append(f"   - Temperature: {sample_alert['weather']['temperature']}")
-        workflow_results.append(f"   - Humidity: {sample_alert['weather']['humidity']}")
-        workflow_results.append(f"   - Expected Rainfall: {sample_alert['weather']['expected_rainfall']}")
-        workflow_results.append(f"   - Rain Probability: {sample_alert['weather']['rain_probability']}%")
-    
-        # WhatsApp Agent Response
-        workflow_results.append("\n📱 WhatsApp Agent Response")
-        workflow_results.append("-" * 30)
-        try:
-            whatsapp_message = whatsapp_agent.create_whatsapp_message(sample_alert)
-            workflow_results.append(f"✅ Message created successfully")
-            workflow_results.append(f"Text: {whatsapp_message.get('text', 'N/A')}")
-            if 'buttons' in whatsapp_message:
-                workflow_results.append(f"Buttons: {len(whatsapp_message['buttons'])} button(s)")
-        except Exception as e:
-            workflow_results.append(f"❌ Error: {str(e)}")
-        
-        # SMS Agent Response
-        workflow_results.append("\n📱 SMS Agent Response")
-        workflow_results.append("-" * 30)
-        try:
-            sms_message = sms_agent.create_sms_message(sample_alert)
-            workflow_results.append(f"✅ SMS created successfully")
-            workflow_results.append(f"Content: {str(sms_message)}")
-        except Exception as e:
-            workflow_results.append(f"❌ Error: {str(e)}")
-        
-        # USSD Agent Response
-        workflow_results.append("\n📞 USSD Agent Response")
-        workflow_results.append("-" * 30)
-        try:
-            ussd_menu = ussd_agent.create_ussd_menu(sample_alert)
-            workflow_results.append(f"✅ USSD menu created successfully")
-            workflow_results.append(f"Menu: {str(ussd_menu)}")
-        except Exception as e:
-            workflow_results.append(f"❌ Error: {str(e)}")
-        
-        # IVR Agent Response
-        workflow_results.append("\n🎙️ IVR Agent Response")
-        workflow_results.append("-" * 30)
-        try:
-            ivr_script = ivr_agent.create_ivr_script(sample_alert)
-            workflow_results.append(f"✅ IVR script created successfully")
-            workflow_results.append(f"Script: {str(ivr_script)}")
-        except Exception as e:
-            workflow_results.append(f"❌ Error: {str(e)}")
-        
-        # Telegram Agent Response
-        workflow_results.append("\n🤖 Telegram Agent Response")
-        workflow_results.append("-" * 30)
-        try:
-            telegram_message = telegram_agent.create_telegram_message(sample_alert)
-            workflow_results.append(f"✅ Telegram message created successfully")
-            workflow_results.append(f"Content: {str(telegram_message)}")
-        except Exception as e:
-            workflow_results.append(f"❌ Error: {str(e)}")
+            workflow_results.append("")
         
         # Summary
-        workflow_results.append("\n✅ Workflow Summary")
-        workflow_results.append("-" * 30)
-        workflow_results.append("Workflow execution completed with REAL weather data")
-        workflow_results.append(f"Location: {request.district}, {request.state}")
-        workflow_results.append(f"Weather Source: Open-Meteo API")
-        workflow_results.append(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        workflow_results.extend([
+            "✅ Workflow Summary",
+            "-" * 30,
+            f"🎯 Successfully generated alerts for {sample_alert['location']['village']}, {request.district}",
+            f"📊 Data Sources: {sample_alert['data_source']}",
+            f"🤖 AI Enhanced: {'Yes' if sample_alert['alert']['ai_generated'] else 'No'}",
+            f"⏰ Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            f"📱 Agents Processed: {len([r for r in agent_responses.values() if not str(r).startswith('Error:')])}/{len(agents)}"
+        ])
         
-        # Join all results into a single formatted string
-        formatted_output = "\n".join(workflow_results)
-
-        # Generate CSV 
-        try:
-            csv_buffer = StringIO()
-            writer = csv.writer(csv_buffer)
-            
-            # Write headers
-            headers = ["weather data", "whatsapp", "sms", "ussd", "ivr", "telegram"]
-            writer.writerow(headers)
-            
-            # Prepare weather data as a single string with line breaks
-            weather_info = "\n".join([
-                f"   - Data Source: {sample_alert.get('data_source', 'API')}",
-                f"   - Alert Type: {sample_alert['alert']['type']}",
-                f"   - Severity: {sample_alert['alert']['urgency']}",
-                f"   - Village: {sample_alert['location']['village']}",
-                f"   - Coordinates: {sample_alert['location']['coordinates']}",
-                f"   - Crop: {sample_alert['crop']['name']} ({sample_alert['crop']['stage']})",
-                f"   - Temperature: {sample_alert['weather']['temperature']}",
-                f"   - Humidity: {sample_alert['weather']['humidity']}",
-                f"   - Expected Rainfall: {sample_alert['weather']['expected_rainfall']}",
-                f"   - Rain Probability: {sample_alert['weather']['rain_probability']}%"
-            ])
-            
-            weather_data = [weather_info]
-            
-            # Extract agent outputs only (no status messages)
-            whatsapp_data = []
-            sms_data = []
-            ussd_data = []
-            ivr_data = []
-            telegram_data = []
-            
-            # Get WhatsApp message
-            try:
-                whatsapp_message = whatsapp_agent.create_whatsapp_message(sample_alert)
-                whatsapp_text = whatsapp_message.get('text', 'N/A')
-                whatsapp_data.append(whatsapp_text)
-                if 'buttons' in whatsapp_message and whatsapp_message['buttons']:
-                    whatsapp_data.append(f"Buttons: {whatsapp_message['buttons']}")
-            except Exception as e:
-                whatsapp_data.append(f"Error: {str(e)}")
-            
-            # Get SMS message
-            try:
-                sms_message = sms_agent.create_sms_message(sample_alert)
-                sms_data.append(str(sms_message))
-            except Exception as e:
-                sms_data.append(f"Error: {str(e)}")
-            
-            # Get USSD menu
-            try:
-                ussd_menu = ussd_agent.create_ussd_menu(sample_alert)
-                ussd_data.append(str(ussd_menu))
-            except Exception as e:
-                ussd_data.append(f"Error: {str(e)}")
-            
-            # Get IVR script
-            try:
-                ivr_script = ivr_agent.create_ivr_script(sample_alert)
-                ivr_data.append(str(ivr_script))
-            except Exception as e:
-                ivr_data.append(f"Error: {str(e)}")
-            
-            # Get Telegram message
-            try:
-                telegram_message = telegram_agent.create_telegram_message(sample_alert)
-                telegram_data.append(str(telegram_message))
-            except Exception as e:
-                telegram_data.append(f"Error: {str(e)}")
-            
-            # Find the maximum number of rows needed
-            max_rows = max(
-                len(weather_data),
-                len(whatsapp_data) if whatsapp_data else 1,
-                len(sms_data) if sms_data else 1,
-                len(ussd_data) if ussd_data else 1,
-                len(ivr_data) if ivr_data else 1,
-                len(telegram_data) if telegram_data else 1
-            )
-            
-            # Write data rows
-            for i in range(max_rows):
-                row = [
-                    weather_data[i] if i < len(weather_data) else "",
-                    whatsapp_data[i] if i < len(whatsapp_data) else "",
-                    sms_data[i] if i < len(sms_data) else "",
-                    ussd_data[i] if i < len(ussd_data) else "",
-                    ivr_data[i] if i < len(ivr_data) else "",
-                    telegram_data[i] if i < len(telegram_data) else ""
-                ]
-                writer.writerow(row)
-
-            csv_content = csv_buffer.getvalue()
-            logger.info("CSV content generated successfully")
-            
-        except Exception as csv_error:
-            logger.error(f"Error generating CSV: {csv_error}")
-            csv_content = f"Error generating CSV: {str(csv_error)}"
+        # Generate CSV
+        csv_content = generate_csv_export(sample_alert, agent_responses)
         
-        logger.info(f"Successfully completed workflow for {request.district}, {request.state}")
         return {
-            "message": formatted_output,
+            "message": "\n".join(workflow_results),
             "status": "success",
             "csv": csv_content,
             "raw_data": {
                 "state": request.state,
                 "district": request.district,
-                "alert_data": sample_alert
+                "alert_data": sample_alert,
+                "agent_responses": agent_responses
             }
         }
         
     except Exception as e:
-        logger.exception(f"Error in workflow for {request.district}, {request.state}")
+        error_msg = f"❌ Workflow failed: {str(e)}"
+        workflow_results.append(error_msg)
+        logger.exception(f"Workflow error for {request.district}, {request.state}")
+        
         return {
-            "message": f"Error running workflow: {str(e)}",
+            "message": "\n".join(workflow_results),
             "status": "error",
             "csv": "",
             "error": str(e)
         }
 
+def generate_csv_export(alert_data: dict, agent_responses: dict) -> str:
+    """Generate CSV export of workflow results"""
+    try:
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer)
+        
+        # Headers
+        headers = ["Field", "Value"]
+        writer.writerow(headers)
+        
+        # Alert data
+        writer.writerow(["Alert ID", alert_data["alert_id"]])
+        writer.writerow(["Village", alert_data["location"]["village"]])
+        writer.writerow(["District", alert_data["location"]["district"]])
+        writer.writerow(["State", alert_data["location"]["state"]])
+        writer.writerow(["Coordinates", str(alert_data["location"]["coordinates"])])
+        writer.writerow(["Crop", alert_data["crop"]["name"]])
+        writer.writerow(["Crop Stage", alert_data["crop"]["stage"]])
+        writer.writerow(["Temperature", alert_data["weather"]["temperature"]])
+        writer.writerow(["Rainfall", alert_data["weather"]["expected_rainfall"]])
+        writer.writerow(["Alert Type", alert_data["alert"]["type"]])
+        writer.writerow(["Urgency", alert_data["alert"]["urgency"]])
+        writer.writerow(["Alert Message", alert_data["alert"]["message"]])
+        
+        # Agent responses
+        writer.writerow([])  # Empty row
+        writer.writerow(["Agent", "Response"])
+        for agent_name, response in agent_responses.items():
+            clean_agent_name = agent_name.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
+            writer.writerow([clean_agent_name, str(response)[:500]])  # Limit response length
+        
+        return csv_buffer.getvalue()
+        
+    except Exception as e:
+        logger.error(f"CSV generation error: {e}")
+        return f"Error generating CSV: {str(e)}"
 
+# Other API endpoints
 @app.post("/mcp")
 async def mcp_endpoint(request: MCPRequest):
+    """MCP tool execution endpoint"""
     logger.info(f"Received request for tool: {request.tool}")
     tool_config = get_tool_config(request.tool)
 
@@ -1121,64 +614,77 @@ async def mcp_endpoint(request: MCPRequest):
         raise HTTPException(status_code=404, detail="Tool not found")
 
     try:
-        if tool_config["module"] == "open_meteo":
-            result = await getattr(open_meteo, request.tool)(**request.parameters)
-        elif tool_config["module"] == "tomorrow_io":
-            api_key = config.get("TOMORROW_IO_API_KEY")
-            result = await getattr(tomorrow_io, request.tool)(**request.parameters, api_key=api_key)
-        elif tool_config["module"] == "google_weather":
-            api_key = config.get("GOOGLE_WEATHER_API_KEY")
-            result = await getattr(google_weather, request.tool)(**request.parameters, api_key=api_key)
-        elif tool_config["module"] == "openweathermap":
-            api_key = config.get("OPENWEATHERMAP_API_KEY")
-            result = await getattr(openweathermap, request.tool)(**request.parameters, api_key=api_key)
-        elif tool_config["module"] == "accuweather":
-            api_key = config.get("ACCUWEATHER_API_KEY")
-            result = await getattr(accuweather, request.tool)(**request.parameters, api_key=api_key)
-        elif tool_config["module"] == "openai_llm":
-            api_key = config.get("OPENAI_API_KEY")
-            result = await getattr(openai_llm, request.tool)(**request.parameters, api_key=api_key)
-        elif tool_config["module"] == "geographic_tools":
-            result = await getattr(geographic_tools, request.tool)(**request.parameters)
-        elif tool_config["module"] == "crop_calendar_tools":
-            result = await getattr(crop_calendar_tools, request.tool)(**request.parameters)
-        elif tool_config["module"] == "alert_generation_tools":
-            api_key = config.get("OPENAI_API_KEY")
-            result = await getattr(alert_generation_tools, request.tool)(**request.parameters, api_key=api_key)
-        else:
+        # Route to appropriate module
+        module_map = {
+            "open_meteo": open_meteo,
+            "tomorrow_io": tomorrow_io,
+            "google_weather": google_weather,
+            "openweathermap": openweathermap,
+            "accuweather": accuweather,
+            "openai_llm": openai_llm,
+            "geographic_tools": geographic_tools,
+            "crop_calendar_tools": crop_calendar_tools,
+            "alert_generation_tools": alert_generation_tools
+        }
+        
+        module = module_map.get(tool_config["module"])
+        if not module:
             raise HTTPException(status_code=500, detail="Invalid tool module")
-
+        
+        # Add API key if needed
+        params = request.parameters.copy()
+        if tool_config["module"] in ["tomorrow_io", "google_weather", "openweathermap", "accuweather"]:
+            api_key_map = {
+                "tomorrow_io": "TOMORROW_IO_API_KEY",
+                "google_weather": "GOOGLE_WEATHER_API_KEY", 
+                "openweathermap": "OPENWEATHERMAP_API_KEY",
+                "accuweather": "ACCUWEATHER_API_KEY"
+            }
+            key_name = api_key_map[tool_config["module"]]
+            params["api_key"] = config.get(key_name)
+        elif tool_config["module"] in ["openai_llm", "alert_generation_tools"]:
+            params["api_key"] = openai_key
+        
+        # Execute tool function
+        result = await getattr(module, request.tool)(**params)
+        
         logger.info(f"Successfully executed tool: {request.tool}")
         return result
+        
     except Exception as e:
         logger.exception(f"Error executing tool: {request.tool}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# A2A Agent endpoints
 @app.post("/a2a/sms")
 async def a2a_sms_endpoint(request: AlertRequest):
+    """SMS agent endpoint"""
     return {"message": sms_agent.create_sms_message(request.alert_json)}
 
 @app.post("/a2a/whatsapp")
 async def a2a_whatsapp_endpoint(request: AlertRequest):
+    """WhatsApp agent endpoint"""
     return whatsapp_agent.create_whatsapp_message(request.alert_json)
 
 @app.post("/a2a/ussd")
 async def a2a_ussd_endpoint(request: AlertRequest):
+    """USSD agent endpoint"""
     return {"menu": ussd_agent.create_ussd_menu(request.alert_json)}
 
 @app.post("/a2a/ivr")
 async def a2a_ivr_endpoint(request: AlertRequest):
+    """IVR agent endpoint"""
     return {"script": ivr_agent.create_ivr_script(request.alert_json)}
 
 @app.post("/a2a/telegram")
 async def a2a_telegram_endpoint(request: AlertRequest):
+    """Telegram agent endpoint"""
     return telegram_agent.create_telegram_message(request.alert_json)
 
-
-# for smithery + context7
-
-@app.post("/mcp")
+# MCP RPC handler for external integration
+@app.post("/mcp-rpc")
 async def mcp_rpc_handler(request: dict):
+    """JSON-RPC handler for MCP integration"""
     method = request.get("method")
     params = request.get("params", {})
     tool_name = params.get("tool_name")
@@ -1192,7 +698,7 @@ async def mcp_rpc_handler(request: dict):
         result = await run_workflow(WorkflowRequest(state=state, district=district))
         return {"jsonrpc": "2.0", "result": result, "id": req_id}
 
-    # Handle other tools dynamically via your tool config
+    # Handle other tools dynamically
     if method == "call_tool":
         try:
             result = await mcp_endpoint(MCPRequest(tool=tool_name, parameters=arguments))
@@ -1202,7 +708,76 @@ async def mcp_rpc_handler(request: dict):
 
     return {"jsonrpc": "2.0", "error": {"code": -32601, "message": "Unknown method"}, "id": req_id}
 
+# Additional utility endpoints
+@app.get("/api/districts/{state}")
+async def get_districts(state: str):
+    """Get list of districts for a state"""
+    try:
+        result = await geographic_tools.list_villages(state)
+        if "districts" in result:
+            return {"districts": result["districts"]}
+        return {"error": "State not found"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/villages/{state}/{district}")
+async def get_villages(state: str, district: str):
+    """Get list of villages for a district"""
+    try:
+        result = await geographic_tools.list_villages(state, district)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/crops/{region}")
+async def get_crops(region: str):
+    """Get list of crops for a region"""
+    try:
+        result = await crop_calendar_tools.get_crop_calendar(region)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/weather/{latitude}/{longitude}")
+async def get_weather(latitude: float, longitude: float):
+    """Get current weather for coordinates"""
+    try:
+        current_weather = await open_meteo.get_current_weather(latitude=latitude, longitude=longitude)
+        forecast = await open_meteo.get_weather_forecast(latitude=latitude, longitude=longitude, days=7)
+        
+        return {
+            "current": current_weather,
+            "forecast": forecast,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    logger.error(f"HTTP {exc.status_code}: {exc.detail}")
+    return {
+        "error": exc.detail,
+        "status_code": exc.status_code,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.exception("Unhandled exception occurred")
+    return {
+        "error": "Internal server error",
+        "message": str(exc),
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    logger.info("Starting MCP Weather Server...")
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=int(os.getenv("PORT", 8000)),
+        log_level=LOG_LEVEL.lower()
+    )
