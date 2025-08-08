@@ -6,7 +6,8 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# gradio port
-EXPOSE 7860
+# Expose both ports
+EXPOSE 7860 8000
 
-CMD ["python", "app.py"]
+# Run server.py
+CMD ["python", "server.py"]
