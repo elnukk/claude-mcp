@@ -932,6 +932,37 @@ def format_agent_responses(agent_responses):
     formatted = [str(item) for item in formatted]
     return '\n'.join(formatted)
 
+def format_alert_summary(raw_data):
+    """Format alert summary"""
+    if not raw_data or 'alert_data' not in raw_data:
+        return "No alert data available"
+    
+    alert_data = raw_data['alert_data']
+    
+    summary = f"""
+## 🚨 Alert Summary
+**📍 Location:** {alert_data['location']['village']}, {alert_data['location']['district']}, {alert_data['location']['state']}
+**🌾 Crop Information:**
+- **Crop:** {alert_data['crop']['name'].title()}
+- **Growth Stage:** {alert_data['crop']['stage']}
+- **Season:** {alert_data['crop']['season'].title()}
+**🌤️ Weather Conditions:**
+- **Temperature:** {alert_data['weather']['temperature']}
+- **Expected Rainfall:** {alert_data['weather']['expected_rainfall']}
+- **Wind Speed:** {alert_data['weather']['wind_speed']}
+- **Rain Probability:** {alert_data['weather']['rain_probability']}%
+**⚠️ Alert Details:**
+- **Type:** {alert_data['alert']['type'].replace('_', ' ').title()}
+- **Urgency:** {alert_data['alert']['urgency'].upper()}
+- **AI Enhanced:** {'✅ Yes' if alert_data['alert']['ai_generated'] else '❌ No'}
+**📨 Alert Message:**
+{alert_data['alert']['message']}
+**🎯 Action Items:**
+{chr(10).join([f"- {item.replace('_', ' ').title()}" for item in alert_data['alert']['action_items']])}
+"""
+    return summary
+
+
 def run_workflow_ui(district):
     """Run workflow directly using internal functions"""
     if not district:
