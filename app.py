@@ -8,7 +8,7 @@ from datetime import datetime
 import os
 
 # Configuration
-MCP_SERVER_PORT = 8001
+MCP_SERVER_PORT = 8001  
 MCP_SERVER_URL = "https://elanuk-mcp-hf.hf.space/"
 
 # Bihar districts list
@@ -136,10 +136,19 @@ def test_mcp_workflow(district):
             "district": district.lower()
         }
         
+        # First check if server is responding
+        try:
+            health_check = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
+            if health_check.status_code != 200:
+                return f"❌ MCP Server not responding properly (status: {health_check.status_code})", "", ""
+        except:
+            return "❌ MCP Server is not running. Please check server status above.", "", ""
+        
+        # Try the workflow endpoint
         response = requests.post(
             f"{MCP_SERVER_URL}/api/run-workflow",
             json=payload,
-            timeout=60  # Increased timeout
+            timeout=60
         )
         
         if response.status_code == 200:
@@ -150,29 +159,46 @@ def test_mcp_workflow(district):
             csv_content = result.get('csv', '')
             
             return workflow_output, alert_summary, csv_content
-            
+        elif response.status_code == 404:
+            return "❌ Workflow endpoint not found. The server may not be fully started or may be missing the workflow functionality.", "", ""
         else:
-            error_msg = f"❌ Server Error ({response.status_code}): {response.text}"
+            error_msg = f"❌ Server Error ({response.status_code}): {response.text[:500]}"
             return error_msg, "", ""
             
     except requests.exceptions.Timeout:
-        return "⏰ Request timed out. The server might be processing...", "", ""
+        return "⏰ Request timed out. The workflow is taking longer than expected...", "", ""
     except requests.exceptions.ConnectionError:
-        return f"🔌 Connection Error: Cannot reach MCP server. Is it running?", "", ""
+        return f"🔌 Connection Error: Cannot reach MCP server at {MCP_SERVER_URL}", "", ""
     except Exception as e:
         return f"❌ Error: {str(e)}", "", ""
 
 def check_server_health():
     """Check if the MCP server is running"""
     try:
+        # Try the health endpoint first
         response = requests.get(f"{MCP_SERVER_URL}/api/health", timeout=10)
         if response.status_code == 200:
             data = response.json()
             return f"✅ Server Online | OpenAI: {'✅' if data.get('openai_available') else '❌'} | Time: {data.get('timestamp', 'N/A')}"
+        elif response.status_code == 404:
+            # Try the root endpoint as fallback
+            try:
+                root_response = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
+                if root_response.status_code == 200:
+                    root_data = root_response.json()
+                    if "MCP Weather Server" in str(root_data):
+                        return f"⚠️ Server Running (health endpoint missing) | Status: {root_data.get('status', 'unknown')}"
+                return f"⚠️ Server responded with status {response.status_code} (health endpoint not found)"
+            except:
+                return f"⚠️ Server responded with status {response.status_code} (health endpoint not found)"
         else:
             return f"⚠️ Server responded with status {response.status_code}"
+    except requests.exceptions.ConnectionError:
+        return f"❌ Cannot connect to server at {MCP_SERVER_URL}"
+    except requests.exceptions.Timeout:
+        return f"⏰ Server connection timeout"
     except Exception as e:
-        return f"❌ Server Offline: {str(e)}"
+        return f"❌ Server check failed: {str(e)}"
 
 # Start server in background thread
 print("🔧 Initializing BIHAR AgMCP...")
@@ -220,14 +246,16 @@ with gr.Blocks(
     
     # Server status
     with gr.Row():
-        server_status = gr.Textbox(
-            label="🔧 Server Status", 
-            value="🔄 Starting server...",
-            interactive=False,
-            container=True
-        )
-        
-        refresh_btn = gr.Button("🔄 Check Status", size="sm")
+        with gr.Column(scale=3):
+            server_status = gr.Textbox(
+                label="🔧 Server Status", 
+                value="🔄 Starting server...",
+                interactive=False,
+                container=True
+            )
+        with gr.Column(scale=1):
+            refresh_btn = gr.Button("🔄 Check Status", size="sm")
+            debug_btn = gr.Button("🔍 Debug Info", size="sm", variant="secondary")
     
     # Main interface
     with gr.Row():
@@ -235,8 +263,8 @@ with gr.Blocks(
             district_input = gr.Dropdown(
                 choices=BIHAR_DISTRICTS,
                 label="📍 Select Bihar District",
-                info="Choose a district...",
-                value="Patna"
+                value="Patna",
+                info="Choose a district to generate weather alerts"
             )
             
             run_btn = gr.Button(
@@ -289,6 +317,36 @@ with gr.Blocks(
     
     # Connect events
     refresh_btn.click(check_server_health, outputs=server_status)
+    
+    def debug_server():
+        """Debug server endpoints"""
+        try:
+            debug_info = []
+            
+            # Test root endpoint
+            try:
+                root_resp = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
+                debug_info.append(f"✅ Root endpoint: {root_resp.status_code} - {root_resp.text[:100]}")
+            except Exception as e:
+                debug_info.append(f"❌ Root endpoint failed: {str(e)}")
+            
+            # Test health endpoint  
+            try:
+                health_resp = requests.get(f"{MCP_SERVER_URL}/api/health", timeout=5)
+                debug_info.append(f"✅ Health endpoint: {health_resp.status_code} - {health_resp.text[:100]}")
+            except Exception as e:
+                debug_info.append(f"❌ Health endpoint failed: {str(e)}")
+                
+            # List what we're trying to connect to
+            debug_info.append(f"🔗 Trying to connect to: {MCP_SERVER_URL}")
+            debug_info.append(f"🐳 Container environment: {os.getenv('SPACE_ID', 'Not in HF Spaces')}")
+            
+            return "🔍 **Debug Information:**\n\n" + "\n".join(debug_info)
+            
+        except Exception as e:
+            return f"❌ Debug failed: {str(e)}"
+    
+    debug_btn.click(debug_server, outputs=workflow_output)
     run_btn.click(
         run_workflow_with_csv,
         inputs=[district_input], 
