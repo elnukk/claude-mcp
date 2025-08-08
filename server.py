@@ -802,6 +802,10 @@ async def general_exception_handler(request, exc):
 
 
 
+
+# UI
+
+
 import gradio as gr
 import threading
 import time
@@ -908,10 +912,18 @@ def run_workflow_ui(district):
         
         # Create CSV file if content exists
         if csv_content:
-            filename = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(csv_content)
-            return workflow_output, alert_summary, gr.File(value=filename, visible=True)
+            import tempfile
+            import os
+            
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as temp_file:
+                temp_file.write(csv_content)
+                temp_filename = temp_file.name
+            
+            # Create a proper filename for download
+            display_name = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            
+            return workflow_output, alert_summary, gr.File(value=temp_filename, visible=True, label=display_name)
         else:
             return workflow_output, alert_summary, gr.File(visible=False)
             
@@ -989,7 +1001,6 @@ def run_fastapi():
     )
 
 if __name__ == "__main__":
-    # Check if we should show UI (HuggingFace Spaces) or just API
     if os.getenv("SPACE_ID") or os.getenv("GRADIO_SERVER_NAME"):
         # HuggingFace Spaces - start FastAPI in background, Gradio in foreground
         logger.info("Starting in HuggingFace Spaces mode with UI...")
@@ -1008,6 +1019,5 @@ if __name__ == "__main__":
             show_error=True
         )
     else:
-        # Local development - just run FastAPI
         logger.info("Starting MCP Weather Server (API only)...")
         run_fastapi()
