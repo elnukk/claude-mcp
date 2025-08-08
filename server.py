@@ -827,11 +827,15 @@ def format_workflow_output(raw_output, agent_responses=None):
     if not raw_output:
         return "❌ No output received"
     
+    # Ensure raw_output is a string
+    if not isinstance(raw_output, str):
+        raw_output = str(raw_output)
+    
     lines = raw_output.split('\n')
     formatted_lines = []
     
     for line in lines:
-        line = line.strip()
+        line = str(line).strip()  # Ensure line is string
         if not line:
             formatted_lines.append("")
             continue
@@ -857,10 +861,12 @@ def format_workflow_output(raw_output, agent_responses=None):
                     if isinstance(response, dict):
                         # Format dictionary responses nicely
                         for key, value in response.items():
-                            if isinstance(value, str) and len(value) > 200:
-                                formatted_lines.append(f"{key}: {value[:200]}...")
+                            key_str = str(key)
+                            value_str = str(value)
+                            if len(value_str) > 200:
+                                formatted_lines.append(f"{key_str}: {value_str[:200]}...")
                             else:
-                                formatted_lines.append(f"{key}: {value}")
+                                formatted_lines.append(f"{key_str}: {value_str}")
                     else:
                         # Format string responses
                         response_str = str(response)
@@ -880,7 +886,6 @@ def format_workflow_output(raw_output, agent_responses=None):
     
     return '\n'.join(formatted_lines)
 
-
 def format_agent_responses(agent_responses):
     """Create a dedicated section for agent responses"""
     if not agent_responses:
@@ -889,23 +894,31 @@ def format_agent_responses(agent_responses):
     formatted = ["## 📱 Agent Responses", ""]
     
     for agent_name, response in agent_responses.items():
-        clean_name = agent_name.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
+        # Ensure agent_name is string
+        agent_name_str = str(agent_name)
+        clean_name = agent_name_str.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
         
-        if str(response).startswith('Error:'):
+        # Convert response to string for error checking
+        response_str = str(response)
+        if response_str.startswith('Error:'):
             formatted.append(f"### ❌ {clean_name}")
-            formatted.append(f"**Error:** {response}")
+            formatted.append(f"**Error:** {response_str}")
         else:
             formatted.append(f"### ✅ {clean_name}")
             
             if isinstance(response, dict):
                 for key, value in response.items():
-                    formatted.append(f"**{key.title()}:**")
-                    if isinstance(value, str) and len(value) > 300:
-                        formatted.append(f"```\n{value[:300]}...\n```")
+                    key_str = str(key)
+                    value_str = str(value)
+                    formatted.append(f"**{key_str.title()}:**")
+                    if len(value_str) > 300:
+                        formatted.append(f"```\n{value_str[:300]}...\n```")
                     elif isinstance(value, list):
-                        formatted.append(f"```\n{chr(10).join(value)}\n```")
+                        # Handle list values
+                        list_str = '\n'.join([str(item) for item in value])
+                        formatted.append(f"```\n{list_str}\n```")
                     else:
-                        formatted.append(f"```\n{value}\n```")
+                        formatted.append(f"```\n{value_str}\n```")
             else:
                 response_str = str(response)
                 if len(response_str) > 300:
@@ -915,44 +928,9 @@ def format_agent_responses(agent_responses):
         
         formatted.append("")
     
+    # Ensure all items in formatted list are strings
+    formatted = [str(item) for item in formatted]
     return '\n'.join(formatted)
-
-
-def format_alert_summary(raw_data):
-    """Format alert summary"""
-    if not raw_data or 'alert_data' not in raw_data:
-        return "No alert data available"
-    
-    alert_data = raw_data['alert_data']
-    
-    summary = f"""
-## 🚨 Alert Summary
-
-**📍 Location:** {alert_data['location']['village']}, {alert_data['location']['district']}, {alert_data['location']['state']}
-
-**🌾 Crop Information:**
-- **Crop:** {alert_data['crop']['name'].title()}
-- **Growth Stage:** {alert_data['crop']['stage']}
-- **Season:** {alert_data['crop']['season'].title()}
-
-**🌤️ Weather Conditions:**
-- **Temperature:** {alert_data['weather']['temperature']}
-- **Expected Rainfall:** {alert_data['weather']['expected_rainfall']}
-- **Wind Speed:** {alert_data['weather']['wind_speed']}
-- **Rain Probability:** {alert_data['weather']['rain_probability']}%
-
-**⚠️ Alert Details:**
-- **Type:** {alert_data['alert']['type'].replace('_', ' ').title()}
-- **Urgency:** {alert_data['alert']['urgency'].upper()}
-- **AI Enhanced:** {'✅ Yes' if alert_data['alert']['ai_generated'] else '❌ No'}
-
-**📨 Alert Message:**
-{alert_data['alert']['message']}
-
-**🎯 Action Items:**
-{chr(10).join([f"- {item.replace('_', ' ').title()}" for item in alert_data['alert']['action_items']])}
-"""
-    return summary
 
 def run_workflow_ui(district):
     """Run workflow directly using internal functions"""
@@ -1005,7 +983,7 @@ def run_workflow_ui(district):
         logger.exception(f"UI workflow error: {e}")
         return error_msg, "", "", gr.File(visible=False)
 
-# Create Gradio interface
+# Updated Gradio interface
 def create_gradio_interface():
     with gr.Blocks(
         title="BIHAR AgMCP - Agricultural Weather Alerts",
@@ -1082,6 +1060,7 @@ def run_fastapi():
         log_level=LOG_LEVEL.lower()
     )
 
+# Usage in your main section:
 if __name__ == "__main__":
     if os.getenv("SPACE_ID") or os.getenv("GRADIO_SERVER_NAME"):
         # HuggingFace Spaces - start FastAPI in background, Gradio in foreground
@@ -1104,3 +1083,4 @@ if __name__ == "__main__":
     else:
         logger.info("Starting MCP Weather Server (API only)...")
         run_fastapi()
+        
