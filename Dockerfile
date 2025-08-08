@@ -6,6 +6,8 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-EXPOSE 7860 8001
+# Expose both ports
+EXPOSE 7860 8000
 
-CMD ["python", "app.py"]
+# Start both services
+CMD uvicorn server:app --host 0.0.0.0 --port 8000 & python app.py
