@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 
 # Configuration
+MCP_SERVER_PORT = 8001
 MCP_SERVER_URL = "https://elanuk-mcp-hf.hf.space/"
 
 # Bihar districts list
