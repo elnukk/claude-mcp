@@ -821,8 +821,9 @@ BIHAR_DISTRICTS = [
     "Sitamarhi", "Sheohar", "Vaishali"
 ]
 
-def format_workflow_output(raw_output):
-    """Format workflow output for display"""
+
+def format_workflow_output(raw_output, agent_responses=None):
+    """Format workflow output for display with actual agent responses"""
     if not raw_output:
         return "❌ No output received"
     
@@ -842,13 +843,80 @@ def format_workflow_output(raw_output):
         elif line.startswith('🌤️') or line.startswith('✅ Workflow'):
             formatted_lines.append(f"### {line}")
         elif line.startswith('📱') or line.startswith('📞') or line.startswith('🎙️') or line.startswith('🤖'):
-            formatted_lines.append(f"#### {line}")
+            # This is an agent section - add the actual response
+            agent_name = line
+            formatted_lines.append(f"#### {agent_name}")
+            
+            # Find the corresponding agent response
+            if agent_responses:
+                clean_name = agent_name.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
+                if clean_name in agent_responses:
+                    response = agent_responses[clean_name]
+                    formatted_lines.append("**Generated Message:**")
+                    formatted_lines.append("```")
+                    if isinstance(response, dict):
+                        # Format dictionary responses nicely
+                        for key, value in response.items():
+                            if isinstance(value, str) and len(value) > 200:
+                                formatted_lines.append(f"{key}: {value[:200]}...")
+                            else:
+                                formatted_lines.append(f"{key}: {value}")
+                    else:
+                        # Format string responses
+                        response_str = str(response)
+                        if len(response_str) > 500:
+                            formatted_lines.append(f"{response_str[:500]}...")
+                        else:
+                            formatted_lines.append(response_str)
+                    formatted_lines.append("```")
+                    formatted_lines.append("")
+                else:
+                    formatted_lines.append("*No response data available*")
+                    formatted_lines.append("")
         elif line.startswith('✅') or line.startswith('❌'):
             formatted_lines.append(f"- {line}")
         else:
             formatted_lines.append(line)
     
     return '\n'.join(formatted_lines)
+
+
+def format_agent_responses(agent_responses):
+    """Create a dedicated section for agent responses"""
+    if not agent_responses:
+        return "No agent responses available"
+    
+    formatted = ["## 📱 Agent Responses", ""]
+    
+    for agent_name, response in agent_responses.items():
+        clean_name = agent_name.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
+        
+        if str(response).startswith('Error:'):
+            formatted.append(f"### ❌ {clean_name}")
+            formatted.append(f"**Error:** {response}")
+        else:
+            formatted.append(f"### ✅ {clean_name}")
+            
+            if isinstance(response, dict):
+                for key, value in response.items():
+                    formatted.append(f"**{key.title()}:**")
+                    if isinstance(value, str) and len(value) > 300:
+                        formatted.append(f"```\n{value[:300]}...\n```")
+                    elif isinstance(value, list):
+                        formatted.append(f"```\n{chr(10).join(value)}\n```")
+                    else:
+                        formatted.append(f"```\n{value}\n```")
+            else:
+                response_str = str(response)
+                if len(response_str) > 300:
+                    formatted.append(f"```\n{response_str[:300]}...\n```")
+                else:
+                    formatted.append(f"```\n{response_str}\n```")
+        
+        formatted.append("")
+    
+    return '\n'.join(formatted)
+
 
 def format_alert_summary(raw_data):
     """Format alert summary"""
@@ -889,10 +957,10 @@ def format_alert_summary(raw_data):
 def run_workflow_ui(district):
     """Run workflow directly using internal functions"""
     if not district:
-        return "❌ Please select a district", "", ""
+        return "❌ Please select a district", "", "", gr.File(visible=False)
     
     try:
-        # Call the workflow function directly (no HTTP request needed!)
+        # Call the workflow function directly
         request_obj = WorkflowRequest(state="bihar", district=district.lower())
         
         # Use asyncio to run the async function
@@ -905,9 +973,14 @@ def run_workflow_ui(district):
         
         result = loop.run_until_complete(run_workflow(request_obj))
         
-        # Format outputs
-        workflow_output = format_workflow_output(result.get('message', ''))
-        alert_summary = format_alert_summary(result.get('raw_data', {}))
+        # Extract data
+        raw_data = result.get('raw_data', {})
+        agent_responses = raw_data.get('agent_responses', {})
+        
+        # Format outputs with agent responses
+        workflow_output = format_workflow_output(result.get('message', ''), agent_responses)
+        alert_summary = format_alert_summary(raw_data)
+        agent_details = format_agent_responses(agent_responses)
         csv_content = result.get('csv', '')
         
         # Create CSV file if content exists
@@ -923,72 +996,81 @@ def run_workflow_ui(district):
             # Create a proper filename for download
             display_name = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             
-            return workflow_output, alert_summary, gr.File(value=temp_filename, visible=True, label=display_name)
+            return workflow_output, alert_summary, agent_details, gr.File(value=temp_filename, visible=True, label=display_name)
         else:
-            return workflow_output, alert_summary, gr.File(visible=False)
+            return workflow_output, alert_summary, agent_details, gr.File(visible=False)
             
     except Exception as e:
         error_msg = f"❌ Error: {str(e)}"
         logger.exception(f"UI workflow error: {e}")
-        return error_msg, "", gr.File(visible=False)
+        return error_msg, "", "", gr.File(visible=False)
 
 # Create Gradio interface
-with gr.Blocks(
-    title="BIHAR AgMCP - Agricultural Weather Alerts",
-    theme=gr.themes.Soft()
-) as demo:
-    
-    gr.Markdown("""
-    # 🌾 BIHAR AgMCP - Agricultural Weather Alert System
-    
-    **AI-Powered Weather Alerts for Bihar Farmers**
-    
-    Generate personalized weather alerts for agricultural activities in Bihar districts.
-    
-    ## How to Use:
-    1. Select a Bihar district from the dropdown
-    2. Click "Generate Weather Alert" 
-    3. View the formatted results and download CSV data
-    """)
-    
-    with gr.Row():
-        with gr.Column(scale=1):
-            district_input = gr.Dropdown(
-                choices=BIHAR_DISTRICTS,
-                label="📍 Select Bihar District",
-                value="Patna"
-            )
+def create_gradio_interface():
+    with gr.Blocks(
+        title="BIHAR AgMCP - Agricultural Weather Alerts",
+        theme=gr.themes.Soft()
+    ) as demo:
+        
+        gr.Markdown("""
+        # 🌾 BIHAR AgMCP - Agricultural Weather Alert System
+        
+        **AI-Powered Weather Alerts for Bihar Farmers**
+        
+        Generate personalized weather alerts for agricultural activities in Bihar districts.
+        
+        ## How to Use:
+        1. Select a Bihar district from the dropdown
+        2. Click "Generate Weather Alert" 
+        3. View the formatted results and download CSV data
+        """)
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                district_input = gr.Dropdown(
+                    choices=BIHAR_DISTRICTS,
+                    label="📍 Select Bihar District",
+                    value="Patna"
+                )
+                
+                run_btn = gr.Button(
+                    "🚀 Generate Weather Alert", 
+                    variant="primary",
+                    size="lg"
+                )
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                workflow_output = gr.Markdown(
+                    label="📋 Workflow Output",
+                    value="Select a district and click the button to generate alerts..."
+                )
             
-            run_btn = gr.Button(
-                "🚀 Generate Weather Alert", 
-                variant="primary",
-                size="lg"
-            )
-    
-    with gr.Row():
-        with gr.Column(scale=2):
-            workflow_output = gr.Markdown(
-                label="📋 Workflow Output",
-                value="Select a district and click the button to generate alerts..."
+            with gr.Column(scale=1):
+                alert_summary = gr.Markdown(
+                    label="📊 Alert Summary",
+                    value="Alert details will appear here..."
+                )
+        
+        with gr.Row():
+            agent_responses = gr.Markdown(
+                label="📱 Agent Messages",
+                value="Agent responses will appear here..."
             )
         
-        with gr.Column(scale=1):
-            alert_summary = gr.Markdown(
-                label="📊 Alert Summary",
-                value="Alert details will appear here..."
-            )
+        csv_output = gr.File(
+            label="📁 Download CSV Data",
+            visible=False
+        )
+        
+        # Connect the button - now with 4 outputs
+        run_btn.click(
+            run_workflow_ui,
+            inputs=[district_input],
+            outputs=[workflow_output, alert_summary, agent_responses, csv_output]
+        )
     
-    csv_output = gr.File(
-        label="📁 Download CSV Data",
-        visible=False
-    )
-    
-    # Connect the button
-    run_btn.click(
-        run_workflow_ui,
-        inputs=[district_input],
-        outputs=[workflow_output, alert_summary, csv_output]
-    )
+    return demo
 
 def run_fastapi():
     """Run FastAPI server"""
@@ -1013,6 +1095,7 @@ if __name__ == "__main__":
         time.sleep(3)
         
         # Launch Gradio interface
+        demo = create_gradio_interface()
         demo.launch(
             server_name="0.0.0.0",
             server_port=7860,
