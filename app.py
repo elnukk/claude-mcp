@@ -1,32 +1,9 @@
 import gradio as gr
 import requests
 from datetime import datetime
-import subprocess
-import threading
-import time
 
-# Start the MCP server
-def start_server():
-    """Start the MCP server"""
-    try:
-        process = subprocess.Popen([
-            "uvicorn", "server:app", 
-            "--host", "0.0.0.0", 
-            "--port", "8000"
-        ])
-        return process
-    except Exception as e:
-        print(f"Failed to start server: {e}")
-        return None
-
-# Start server in background thread
-print("🚀 Starting MCP server...")
-server_thread = threading.Thread(target=start_server, daemon=True)
-server_thread.start()
-
-# Wait for server to start
-print("⏳ Waiting for server to start...")
-time.sleep(10)
+# Use your deployed server instead of localhost
+MCP_SERVER_URL = "https://elanuk-mcp-hf.hf.space"
 
 # Bihar districts list
 BIHAR_DISTRICTS = [
@@ -115,9 +92,9 @@ def run_workflow(district):
             "district": district.lower()
         }
         
-        # Call your existing endpoint directly
+        # Call your existing deployed server
         response = requests.post(
-            "http://localhost:8000/api/run-workflow",
+            f"{MCP_SERVER_URL}/api/run-workflow",
             json=payload,
             timeout=60
         )
