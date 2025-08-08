@@ -1,15 +1,6 @@
 import gradio as gr
-import subprocess
-import threading
-import time
 import requests
-import json
 from datetime import datetime
-import os
-
-# Configuration
-MCP_SERVER_PORT = 8001  
-MCP_SERVER_URL = "https://elanuk-mcp-hf.hf.space/"
 
 # Bihar districts list
 BIHAR_DISTRICTS = [
@@ -22,44 +13,8 @@ BIHAR_DISTRICTS = [
     "Sitamarhi", "Sheohar", "Vaishali"
 ]
 
-def start_mcp_server():
-    """Start the MCP server in background"""
-    try:
-        print("🚀 Starting MCP Server...")
-        # Set environment variable for the server port
-        env = os.environ.copy()
-        env["PORT"] = str(MCP_SERVER_PORT)
-        
-        process = subprocess.Popen(
-            ["python", "mcp_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            text=True
-        )
-        
-        # Wait for server to start
-        print("⏳ Waiting for server to start...")
-        time.sleep(15)
-        
-        # Check if server is running
-        try:
-            response = requests.get(f"{MCP_SERVER_URL}/api/health", timeout=5)
-            if response.status_code == 200:
-                print("✅ MCP Server started successfully!")
-                return process
-        except:
-            pass
-            
-        print("⚠️ Server may still be starting...")
-        return process
-        
-    except Exception as e:
-        print(f"❌ Failed to start MCP server: {e}")
-        return None
-
 def format_workflow_output(raw_output):
-    """Format the workflow output for better display"""
+    """Format the workflow output for display"""
     if not raw_output:
         return "❌ No output received"
     
@@ -82,8 +37,6 @@ def format_workflow_output(raw_output):
             formatted_lines.append(f"#### {line}")
         elif line.startswith('✅') or line.startswith('❌'):
             formatted_lines.append(f"- {line}")
-        elif line.startswith('   '):
-            formatted_lines.append(f"  {line.strip()}")
         else:
             formatted_lines.append(line)
     
@@ -125,8 +78,8 @@ def format_alert_summary(raw_data):
 """
     return summary
 
-def test_mcp_workflow(district):
-    """Test the MCP workflow for a given district"""
+def run_workflow(district):
+    """Run the workflow and return results"""
     if not district:
         return "❌ Please select a district", "", ""
     
@@ -136,17 +89,9 @@ def test_mcp_workflow(district):
             "district": district.lower()
         }
         
-        # First check if server is responding
-        try:
-            health_check = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
-            if health_check.status_code != 200:
-                return f"❌ MCP Server not responding properly (status: {health_check.status_code})", "", ""
-        except:
-            return "❌ MCP Server is not running. Please check server status above.", "", ""
-        
-        # Try the workflow endpoint
+        # Call your existing endpoint directly
         response = requests.post(
-            f"{MCP_SERVER_URL}/api/run-workflow",
+            "http://localhost:8000/api/run-workflow",
             json=payload,
             timeout=60
         )
@@ -158,69 +103,27 @@ def test_mcp_workflow(district):
             alert_summary = format_alert_summary(result.get('raw_data', {}))
             csv_content = result.get('csv', '')
             
-            return workflow_output, alert_summary, csv_content
-        elif response.status_code == 404:
-            return "❌ Workflow endpoint not found. The server may not be fully started or may be missing the workflow functionality.", "", ""
+            # Create CSV file if content exists
+            if csv_content:
+                filename = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(csv_content)
+                return workflow_output, alert_summary, gr.File(value=filename, visible=True)
+            else:
+                return workflow_output, alert_summary, gr.File(visible=False)
+                
         else:
-            error_msg = f"❌ Server Error ({response.status_code}): {response.text[:500]}"
-            return error_msg, "", ""
+            error_msg = f"❌ Server Error ({response.status_code})"
+            return error_msg, "", gr.File(visible=False)
             
-    except requests.exceptions.Timeout:
-        return "⏰ Request timed out. The workflow is taking longer than expected...", "", ""
-    except requests.exceptions.ConnectionError:
-        return f"🔌 Connection Error: Cannot reach MCP server at {MCP_SERVER_URL}", "", ""
     except Exception as e:
-        return f"❌ Error: {str(e)}", "", ""
-
-def check_server_health():
-    """Check if the MCP server is running"""
-    try:
-        # Try the health endpoint first
-        response = requests.get(f"{MCP_SERVER_URL}/api/health", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return f"✅ Server Online | OpenAI: {'✅' if data.get('openai_available') else '❌'} | Time: {data.get('timestamp', 'N/A')}"
-        elif response.status_code == 404:
-            # Try the root endpoint as fallback
-            try:
-                root_response = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
-                if root_response.status_code == 200:
-                    root_data = root_response.json()
-                    if "MCP Weather Server" in str(root_data):
-                        return f"⚠️ Server Running (health endpoint missing) | Status: {root_data.get('status', 'unknown')}"
-                return f"⚠️ Server responded with status {response.status_code} (health endpoint not found)"
-            except:
-                return f"⚠️ Server responded with status {response.status_code} (health endpoint not found)"
-        else:
-            return f"⚠️ Server responded with status {response.status_code}"
-    except requests.exceptions.ConnectionError:
-        return f"❌ Cannot connect to server at {MCP_SERVER_URL}"
-    except requests.exceptions.Timeout:
-        return f"⏰ Server connection timeout"
-    except Exception as e:
-        return f"❌ Server check failed: {str(e)}"
-
-# Start server in background thread
-print("🔧 Initializing BIHAR AgMCP...")
-server_process = None
-
-def start_server_thread():
-    global server_process
-    server_process = start_mcp_server()
-
-server_thread = threading.Thread(target=start_server_thread, daemon=True)
-server_thread.start()
+        error_msg = f"❌ Error: {str(e)}"
+        return error_msg, "", gr.File(visible=False)
 
 # Create Gradio interface
 with gr.Blocks(
     title="BIHAR AgMCP - Agricultural Weather Alerts",
-    theme=gr.themes.Soft(),
-    css="""
-    .gradio-container {
-        max-width: 1200px;
-        margin: auto;
-    }
-    """
+    theme=gr.themes.Soft()
 ) as demo:
     
     gr.Markdown("""
@@ -228,43 +131,20 @@ with gr.Blocks(
     
     **AI-Powered Weather Alerts for Bihar Farmers**
     
-    This system generates personalized weather alerts for agricultural activities in Bihar districts.
+    Generate personalized weather alerts for agricultural activities in Bihar districts.
     
-    ## 📋 How to Use:
-    1. **Wait for Server**: Ensure server status shows "Online" below
-    2. **Select District**: Choose a Bihar district from the dropdown  
-    3. **Run Workflow**: Click the button to generate weather alerts
-    4. **View Results**: See formatted workflow output and alert summary
-    5. **Download Data**: Get CSV export of the alert data
-    
-    The system will automatically:
-    - Select a random village in the district
-    - Choose appropriate crops based on season and region  
-    - Generate weather-based agricultural alerts
-    - Create messages for multiple communication channels
+    ## How to Use:
+    1. Select a Bihar district from the dropdown
+    2. Click "Generate Weather Alert" 
+    3. View the formatted results and download CSV data
     """)
     
-    # Server status
-    with gr.Row():
-        with gr.Column(scale=3):
-            server_status = gr.Textbox(
-                label="🔧 Server Status", 
-                value="🔄 Starting server...",
-                interactive=False,
-                container=True
-            )
-        with gr.Column(scale=1):
-            refresh_btn = gr.Button("🔄 Check Status", size="sm")
-            debug_btn = gr.Button("🔍 Debug Info", size="sm", variant="secondary")
-    
-    # Main interface
     with gr.Row():
         with gr.Column(scale=1):
             district_input = gr.Dropdown(
                 choices=BIHAR_DISTRICTS,
                 label="📍 Select Bihar District",
-                value="Patna",
-                info="Choose a district to generate weather alerts"
+                value="Patna"
             )
             
             run_btn = gr.Button(
@@ -272,112 +152,34 @@ with gr.Blocks(
                 variant="primary",
                 size="lg"
             )
-            
-            gr.Markdown("""
-            ### 💡 What happens next?
-            - Weather data collection from multiple sources
-            - Intelligent crop stage estimation  
-            - AI-powered alert generation
-            - Multi-channel message creation (SMS, WhatsApp, etc.)
-            - Comprehensive CSV data export
-            """)
     
-    # Results section
     with gr.Row():
         with gr.Column(scale=2):
             workflow_output = gr.Markdown(
                 label="📋 Workflow Output",
-                value="Server is starting... Please wait and check server status above."
+                value="Select a district and click the button to generate alerts..."
             )
         
         with gr.Column(scale=1):
             alert_summary = gr.Markdown(
-                label="📊 Alert Summary", 
-                value="Alert details will appear here after running workflow..."
+                label="📊 Alert Summary",
+                value="Alert details will appear here..."
             )
     
-    # CSV export
-    with gr.Row():
-        csv_output = gr.File(
-            label="📁 Download CSV Data",
-            visible=False
-        )
-    
-    # Event handling
-    def run_workflow_with_csv(district):
-        workflow, summary, csv_content = test_mcp_workflow(district)
-        
-        if csv_content and not csv_content.startswith("Error"):
-            filename = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(csv_content)
-            return workflow, summary, gr.File(value=filename, visible=True)
-        else:
-            return workflow, summary, gr.File(visible=False)
-    
-    # Connect events
-    refresh_btn.click(check_server_health, outputs=server_status)
-    
-    def debug_server():
-        """Debug server endpoints"""
-        try:
-            debug_info = []
-            
-            # Test root endpoint
-            try:
-                root_resp = requests.get(f"{MCP_SERVER_URL}/", timeout=5)
-                debug_info.append(f"✅ Root endpoint: {root_resp.status_code} - {root_resp.text[:100]}")
-            except Exception as e:
-                debug_info.append(f"❌ Root endpoint failed: {str(e)}")
-            
-            # Test health endpoint  
-            try:
-                health_resp = requests.get(f"{MCP_SERVER_URL}/api/health", timeout=5)
-                debug_info.append(f"✅ Health endpoint: {health_resp.status_code} - {health_resp.text[:100]}")
-            except Exception as e:
-                debug_info.append(f"❌ Health endpoint failed: {str(e)}")
-                
-            # List what we're trying to connect to
-            debug_info.append(f"🔗 Trying to connect to: {MCP_SERVER_URL}")
-            debug_info.append(f"🐳 Container environment: {os.getenv('SPACE_ID', 'Not in HF Spaces')}")
-            
-            return "🔍 **Debug Information:**\n\n" + "\n".join(debug_info)
-            
-        except Exception as e:
-            return f"❌ Debug failed: {str(e)}"
-    
-    debug_btn.click(debug_server, outputs=workflow_output)
-    run_btn.click(
-        run_workflow_with_csv,
-        inputs=[district_input], 
-        outputs=[workflow_output, alert_summary, csv_output]
+    csv_output = gr.File(
+        label="📁 Download CSV Data",
+        visible=False
     )
     
-    # Auto-refresh server status after a delay
-    def auto_check_status():
-        time.sleep(20)  # Wait 20 seconds
-        return check_server_health()
-    
-    demo.load(auto_check_status, outputs=server_status)
-    
-    # Footer
-    gr.Markdown("""
-    ---
-    
-    ### 🔗 System Information:
-    - **State Coverage**: Bihar (38+ districts)
-    - **Crops Supported**: Rice, Wheat, Maize, Sugarcane, Mustard, and more
-    - **Weather Sources**: Open-Meteo API with AI enhancement
-    - **Communication Channels**: SMS, WhatsApp, USSD, IVR, Telegram
-    
-    *Built with MCP (Model Context Protocol) for agricultural intelligence*
-    """)
+    # Connect the button
+    run_btn.click(
+        run_workflow,
+        inputs=[district_input],
+        outputs=[workflow_output, alert_summary, csv_output]
+    )
 
-# Launch the interface
 if __name__ == "__main__":
-    print("🌾 Launching BIHAR AgMCP Interface...")
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7860,
-        show_error=True
+        server_port=7860
     )
