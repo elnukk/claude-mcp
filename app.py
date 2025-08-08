@@ -235,7 +235,7 @@ with gr.Blocks(
             district_input = gr.Dropdown(
                 choices=BIHAR_DISTRICTS,
                 label="📍 Select Bihar District",
-                placeholder="Choose a district...",
+                info="Choose a district...",
                 value="Patna"
             )
             
