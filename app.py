@@ -1,6 +1,32 @@
 import gradio as gr
 import requests
 from datetime import datetime
+import subprocess
+import threading
+import time
+
+# Start the MCP server
+def start_server():
+    """Start the MCP server"""
+    try:
+        process = subprocess.Popen([
+            "uvicorn", "server:app", 
+            "--host", "0.0.0.0", 
+            "--port", "8000"
+        ])
+        return process
+    except Exception as e:
+        print(f"Failed to start server: {e}")
+        return None
+
+# Start server in background thread
+print("🚀 Starting MCP server...")
+server_thread = threading.Thread(target=start_server, daemon=True)
+server_thread.start()
+
+# Wait for server to start
+print("⏳ Waiting for server to start...")
+time.sleep(10)
 
 # Bihar districts list
 BIHAR_DISTRICTS = [
