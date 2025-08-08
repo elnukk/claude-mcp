@@ -535,36 +535,36 @@ async def run_workflow(request: WorkflowRequest):
         
         agent_responses = {}
         
-        # for agent_name, agent_func in agents:
-        #     workflow_results.extend([agent_name, "-" * 30])
-        #     try:
-        #         response = agent_func(sample_alert)
-        #         workflow_results.append("✅ Message generated successfully")
-        #         agent_responses[agent_name] = response
+        for agent_name, agent_func in agents:
+            workflow_results.extend([agent_name, "-" * 30])
+            try:
+                response = agent_func(sample_alert)
+                workflow_results.append("✅ Message generated successfully")
+                agent_responses[agent_name] = response
                 
-        #         # Add preview for some agents
-        #         if "WhatsApp" in agent_name:
-        #             text = response.get('text', 'N/A')
-        #             workflow_results.append(f"   Preview: {text[:100]}..." if len(text) > 100 else f"   Preview: {text}")
-        #         elif "SMS" in agent_name:
-        #             workflow_results.append(f"   Preview: {str(response)[:100]}...")
+                # Add preview for some agents
+                if "WhatsApp" in agent_name:
+                    text = response.get('text', 'N/A')
+                    workflow_results.append(f"   Preview: {text[:100]}..." if len(text) > 100 else f"   Preview: {text}")
+                elif "SMS" in agent_name:
+                    workflow_results.append(f"   Preview: {str(response)[:100]}...")
                 
-        #     except Exception as e:
-        #         workflow_results.append(f"❌ Error: {str(e)}")
-        #         agent_responses[agent_name] = f"Error: {str(e)}"
+            except Exception as e:
+                workflow_results.append(f"❌ Error: {str(e)}")
+                agent_responses[agent_name] = f"Error: {str(e)}"
             
-        #     workflow_results.append("")
+            workflow_results.append("")
         
         # Summary
-        # workflow_results.extend([
-        #     "✅ Workflow Summary",
-        #     "-" * 30,
-        #     f"🎯 Successfully generated alerts for {sample_alert['location']['village']}, {request.district}",
-        #     f"📊 Data Sources: {sample_alert['data_source']}",
-        #     f"🤖 AI Enhanced: {'Yes' if sample_alert['alert']['ai_generated'] else 'No'}",
-        #     f"⏰ Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        #     f"📱 Agents Processed: {len([r for r in agent_responses.values() if not str(r).startswith('Error:')])}/{len(agents)}"
-        # ])
+        workflow_results.extend([
+            "✅ Workflow Summary",
+            "-" * 30,
+            f"🎯 Successfully generated alerts for {sample_alert['location']['village']}, {request.district}",
+            f"📊 Data Sources: {sample_alert['data_source']}",
+            f"🤖 AI Enhanced: {'Yes' if sample_alert['alert']['ai_generated'] else 'No'}",
+            f"⏰ Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            f"📱 Agents Processed: {len([r for r in agent_responses.values() if not str(r).startswith('Error:')])}/{len(agents)}"
+        ])
         
         # Generate CSV
         csv_content = generate_csv_export(sample_alert, agent_responses)
