@@ -3,9 +3,36 @@ import requests
 import json
 from datetime import datetime
 import os
+import subprocess
+import threading
+import time
 
-# Configuration
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://elanuk-mcp-hf.hf.space/")
+# Configuration - for HuggingFace Spaces
+MCP_SERVER_URL = "https://elanuk-mcp-hf.hf.space/"  # Local server URL
+
+def start_mcp_server():
+    """Start the MCP server in background"""
+    try:
+        # Start mcp_server.py as subprocess  
+        process = subprocess.Popen(
+            ["python", "mcp_server.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Wait a bit for server to start
+        time.sleep(10)
+        return process
+    except Exception as e:
+        print(f"Failed to start MCP server: {e}")
+        return None
+
+# Start server in background thread
+def start_server_thread():
+    start_mcp_server()
+
+server_thread = threading.Thread(target=start_server_thread, daemon=True)
+server_thread.start()
 
 # Bihar districts list
 BIHAR_DISTRICTS = [
