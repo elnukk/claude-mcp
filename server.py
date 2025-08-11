@@ -821,71 +821,109 @@ BIHAR_DISTRICTS = [
     "Sitamarhi", "Sheohar", "Vaishali"
 ]
 
-
 def format_workflow_output(raw_output, agent_responses=None):
-    """Format workflow output for display with actual agent responses"""
+    """Format workflow output for display with actual agent responses - skip detailed workflow steps"""
     if not raw_output:
         return "❌ No output received"
     
-    # Ensure raw_output is a string
     if not isinstance(raw_output, str):
         raw_output = str(raw_output)
     
     lines = raw_output.split('\n')
     formatted_lines = []
     
+    capture_content = False
+    
     for line in lines:
         line = str(line).strip()  # Ensure line is string
         if not line:
-            formatted_lines.append("")
+            if capture_content:
+                formatted_lines.append("")
             continue
-            
-        if line.startswith('🌾') and 'Workflow' in line:
-            formatted_lines.append(f"## {line}")
-        elif line.startswith('=') or line.startswith('-'):
-            continue
-        elif line.startswith('🌤️') or line.startswith('✅ Workflow'):
+        
+        if line.startswith('✅ Workflow Summary'):
+            capture_content = True
             formatted_lines.append(f"### {line}")
-        elif line.startswith('📱') or line.startswith('📞') or line.startswith('🎙️') or line.startswith('🤖'):
-            # This is an agent section - add the actual response
-            agent_name = line
-            formatted_lines.append(f"#### {agent_name}")
+            continue
+        
+        if not capture_content:
+            continue
             
-            # Find the corresponding agent response
-            if agent_responses:
-                clean_name = agent_name.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
-                if clean_name in agent_responses:
-                    response = agent_responses[clean_name]
-                    formatted_lines.append("**Generated Message:**")
-                    formatted_lines.append("```")
-                    if isinstance(response, dict):
-                        # Format dictionary responses nicely
-                        for key, value in response.items():
-                            key_str = str(key)
-                            value_str = str(value)
-                            if len(value_str) > 200:
-                                formatted_lines.append(f"{key_str}: {value_str[:200]}...")
-                            else:
-                                formatted_lines.append(f"{key_str}: {value_str}")
-                    else:
-                        # Format string responses
-                        response_str = str(response)
-                        if len(response_str) > 500:
-                            formatted_lines.append(f"{response_str[:500]}...")
-                        else:
-                            formatted_lines.append(response_str)
-                    formatted_lines.append("```")
-                    formatted_lines.append("")
-                else:
-                    formatted_lines.append("*No response data available*")
-                    formatted_lines.append("")
-        elif line.startswith('✅') or line.startswith('❌'):
+        if line.startswith('=') or line.startswith('-'):
+            continue
+        elif line.startswith('🎯') or line.startswith('📊') or line.startswith('🤖') or line.startswith('⏰') or line.startswith('📱'):
             formatted_lines.append(f"- {line}")
         else:
             formatted_lines.append(line)
+
+    if not capture_content or not formatted_lines:
+        return "✅ Alert generated successfully - check other tabs for details"
     
     return '\n'.join(formatted_lines)
 
+
+async def run_workflow_clean(request: WorkflowRequest):
+    logger.info(f"Received workflow request: {request.state}, {request.district}")
+    
+    try:
+        # Generate dynamic alert
+        sample_alert = await generate_dynamic_alert(request.district, request.state)
+        
+        # Generate agent responses
+        agents = [
+            ("📱 WhatsApp Agent", whatsapp_agent.create_whatsapp_message),
+            ("📱 SMS Agent", sms_agent.create_sms_message),
+            ("📞 USSD Agent", ussd_agent.create_ussd_menu),
+            ("🎙️ IVR Agent", ivr_agent.create_ivr_script),
+            ("🤖 Telegram Agent", telegram_agent.create_telegram_message)
+        ]
+        
+        agent_responses = {}
+        successful_agents = 0
+        
+        for agent_name, agent_func in agents:
+            try:
+                response = agent_func(sample_alert)
+                agent_responses[agent_name] = response
+                successful_agents += 1
+            except Exception as e:
+                agent_responses[agent_name] = f"Error: {str(e)}"
+        
+        summary_message = f"""### ✅ Workflow Summary
+
+🎯 Successfully generated alerts for {sample_alert['location']['village']}, {request.district.title()}
+📊 Data Sources: {sample_alert['data_source']}
+🤖 AI Enhanced: {'Yes' if sample_alert['alert']['ai_generated'] else 'No'}
+⏰ Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+📱 Agents Processed: {successful_agents}/{len(agents)}"""
+        
+        # Generate CSV
+        csv_content = generate_csv_export(sample_alert, agent_responses)
+        
+        return {
+            "message": summary_message,
+            "status": "success",
+            "csv": csv_content,
+            "raw_data": {
+                "state": request.state,
+                "district": request.district,
+                "alert_data": sample_alert,
+                "agent_responses": agent_responses
+            }
+        }
+        
+    except Exception as e:
+        error_msg = f"❌ Workflow failed: {str(e)}"
+        logger.exception(f"Workflow error for {request.district}, {request.state}")
+        
+        return {
+            "message": error_msg,
+            "status": "error",
+            "csv": "",
+            "error": str(e)
+        }
+
+    
 def format_agent_responses(agent_responses):
     """Create a dedicated section for agent responses"""
     if not agent_responses:
@@ -932,6 +970,7 @@ def format_agent_responses(agent_responses):
     formatted = [str(item) for item in formatted]
     return '\n'.join(formatted)
 
+
 def format_alert_summary(raw_data):
     """Format alert summary"""
     if not raw_data or 'alert_data' not in raw_data:
@@ -964,15 +1003,13 @@ def format_alert_summary(raw_data):
 
 
 def run_workflow_ui(district):
-    """Run workflow directly using internal functions"""
+    """Run workflow directly using internal functions with clean output"""
     if not district:
         return "❌ Please select a district", "", "", gr.File(visible=False)
     
     try:
-        # Call the workflow function directly
         request_obj = WorkflowRequest(state="bihar", district=district.lower())
         
-        # Use asyncio to run the async function
         import asyncio
         try:
             loop = asyncio.get_event_loop()
@@ -980,14 +1017,13 @@ def run_workflow_ui(district):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        result = loop.run_until_complete(run_workflow(request_obj))
+        result = loop.run_until_complete(run_workflow_clean(request_obj))
         
         # Extract data
         raw_data = result.get('raw_data', {})
         agent_responses = raw_data.get('agent_responses', {})
         
-        # Format outputs with agent responses
-        workflow_output = format_workflow_output(result.get('message', ''), agent_responses)
+        workflow_output = result.get('message', '')
         alert_summary = format_alert_summary(raw_data)
         agent_details = format_agent_responses(agent_responses)
         csv_content = result.get('csv', '')
@@ -997,12 +1033,10 @@ def run_workflow_ui(district):
             import tempfile
             import os
             
-            # Create temporary file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as temp_file:
                 temp_file.write(csv_content)
                 temp_filename = temp_file.name
             
-            # Create a proper filename for download
             display_name = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             
             return workflow_output, alert_summary, agent_details, gr.File(value=temp_filename, visible=True, label=display_name)
@@ -1014,7 +1048,9 @@ def run_workflow_ui(district):
         logger.exception(f"UI workflow error: {e}")
         return error_msg, "", "", gr.File(visible=False)
 
-# Updated Gradio interface
+
+
+# Gradio interface
 def create_gradio_interface():
     with gr.Blocks(
         title="BIHAR AgMCP - Agricultural Weather Alerts",
