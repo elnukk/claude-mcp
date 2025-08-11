@@ -1127,7 +1127,7 @@ def run_fastapi():
         log_level=LOG_LEVEL.lower()
     )
 
-# Usage in your main section:
+# Usage in main section:
 if __name__ == "__main__":
     if os.getenv("SPACE_ID") or os.getenv("GRADIO_SERVER_NAME"):
         # HuggingFace Spaces - start FastAPI in background, Gradio in foreground
