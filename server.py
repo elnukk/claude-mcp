@@ -1029,9 +1029,9 @@ def run_workflow_ui(district):
             
             display_name = f"bihar_alert_{district.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             
-            return workflow_output, alert_summary, agent_details, gr.File(value=temp_filename, visible=True, label=display_name)
+            return alert_summary, agent_details, gr.File(value=temp_filename, visible=True, label=display_name)
         else:
-            return workflow_output, alert_summary, agent_details, gr.File(visible=False)
+            return alert_summary, agent_details, gr.File(visible=False)
             
     except Exception as e:
         error_msg = f"❌ Error: {str(e)}"
