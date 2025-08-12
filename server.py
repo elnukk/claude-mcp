@@ -1075,13 +1075,6 @@ def create_gradio_interface():
                 )
         
         with gr.Row():
-            with gr.Column(scale=1):
-                workflow_output = gr.Markdown(
-                    label="📋 Workflow Output",
-                    value="Select a district and click the button to generate alerts..."
-                )
-            
-            with gr.Column(scale=1):
                 alert_summary = gr.Markdown(
                     label="📊 Alert Summary",
                     value="Alert details will appear here..."
