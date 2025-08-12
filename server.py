@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import dotenv_values
 
-# Import your tools
+# Import tools
 from tools import (
     open_meteo, 
     tomorrow_io, 
@@ -319,7 +319,6 @@ async def generate_ai_alert(latitude: float, longitude: float, crop: str,
             'precipitation_forecast': daily_forecast.get('precipitation_sum', [0, 0, 0])[:3]
         }
         
-        # Use the generate_weather_alert function from your tools
         ai_alert = await alert_generation_tools.generate_weather_alert(
             crop=crop,
             weather_data=weather_context,
@@ -329,7 +328,7 @@ async def generate_ai_alert(latitude: float, longitude: float, crop: str,
             longitude=longitude
         )
         
-        # Extract AI response (adjust based on your actual function return format)
+        # Extract AI response 
         if isinstance(ai_alert, dict):
             alert_description = ai_alert.get('alert', 'Weather update for agricultural activities')
             impact_description = ai_alert.get('impact', 'Monitor crops regularly') 
@@ -709,7 +708,7 @@ async def a2a_telegram_endpoint(request: AlertRequest):
     """Telegram agent endpoint"""
     return telegram_agent.create_telegram_message(request.alert_json)
 
-# MCP RPC handler for external integration
+# MCP RPC handler 
 @app.post("/mcp-rpc")
 async def mcp_rpc_handler(request: dict):
     """JSON-RPC handler for MCP integration"""
@@ -801,16 +800,12 @@ async def general_exception_handler(request, exc):
     }
 
 
-
-
 # UI
-
-
 import gradio as gr
 import threading
 import time
 
-# Bihar districts list
+# Bihar districts list for dropdown
 BIHAR_DISTRICTS = [
     "Patna", "Gaya", "Bhagalpur", "Muzaffarpur", "Darbhanga", "Siwan", 
     "Begusarai", "Katihar", "Nalanda", "Rohtas", "Saran", "Samastipur",
@@ -923,7 +918,6 @@ def format_agent_responses(agent_responses):
     formatted = ["## 📱 Agent Responses", ""]
     
     for agent_name, response in agent_responses.items():
-        # Ensure agent_name is string
         agent_name_str = str(agent_name)
         clean_name = agent_name_str.replace("📱 ", "").replace("📞 ", "").replace("🎙️ ", "").replace("🤖 ", "")
         
