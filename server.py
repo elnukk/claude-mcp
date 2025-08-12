@@ -822,7 +822,7 @@ BIHAR_DISTRICTS = [
 ]
 
 def format_workflow_output(raw_output, agent_responses=None):
-    """Format workflow output for display with actual agent responses - skip detailed workflow steps"""
+    """Format workflow output for display"""
     if not raw_output:
         return "❌ No output received"
     
@@ -889,19 +889,10 @@ async def run_workflow_clean(request: WorkflowRequest):
             except Exception as e:
                 agent_responses[agent_name] = f"Error: {str(e)}"
         
-        summary_message = f"""### ✅ Workflow Summary
-
-🎯 Successfully generated alerts for {sample_alert['location']['village']}, {request.district.title()}
-📊 Data Sources: {sample_alert['data_source']}
-🤖 AI Enhanced: {'Yes' if sample_alert['alert']['ai_generated'] else 'No'}
-⏰ Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
-📱 Agents Processed: {successful_agents}/{len(agents)}"""
-        
         # Generate CSV
         csv_content = generate_csv_export(sample_alert, agent_responses)
         
         return {
-            "message": summary_message,
             "status": "success",
             "csv": csv_content,
             "raw_data": {
@@ -1023,7 +1014,6 @@ def run_workflow_ui(district):
         raw_data = result.get('raw_data', {})
         agent_responses = raw_data.get('agent_responses', {})
         
-        workflow_output = result.get('message', '')
         alert_summary = format_alert_summary(raw_data)
         agent_details = format_agent_responses(agent_responses)
         csv_content = result.get('csv', '')
