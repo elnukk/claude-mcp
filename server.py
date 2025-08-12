@@ -1091,11 +1091,11 @@ def create_gradio_interface():
             visible=False
         )
         
-        # Connect the button - now with 4 outputs
+        # Connect the button 
         run_btn.click(
             run_workflow_ui,
             inputs=[district_input],
-            outputs=[workflow_output, alert_summary, agent_responses, csv_output]
+            outputs=[alert_summary, agent_responses, csv_output]
         )
     
     return demo
